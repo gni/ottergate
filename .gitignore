@@ -1,0 +1,24 @@
+# Local Ottergate configuration and security keys
+config/.ottergate-master-key
+config/client.crt
+config/client.key
+config/ca.crt
+
+# AI Agent metadata and sandbox settings
+.antigravitycli/
+.agent/
+
+# Compiled Go binary
+ottergate
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+*.crt
+*.key
+*.csr
+*.srl
+config/resolv.conf
+
+dev

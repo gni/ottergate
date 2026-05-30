@@ -1,0 +1,99 @@
+version: '3.8'
+
+services:
+  ottergate:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    runtime: runc
+    cap_add:
+      - NET_ADMIN
+    user: "root"
+    ports:
+      - "8080:8080/tcp"  # Control Plane bind
+      - "8053:53/udp"    # DNS UDP bind
+      - "8053:53/tcp"    # DNS TCP bind
+      - "8081:80/tcp"    # HTTP proxy bind
+      - "8443:443/tcp"   # SNI proxy bind
+    volumes:
+      - ../config:/app/config
+    environment:
+      - OTTERGATE_PORT=53
+      - OTTERGATE_FALLBACK_DNS=1.1.1.1
+      - OTTERGATE_SANDBOX_SUBNETS=172.20.0.0/16,172.21.0.0/16
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+    command: ["--config", "/app/config/config.json", "start"]
+    networks:
+      sandbox_net:
+        ipv4_address: 172.20.0.53
+      test_net:
+      external_net:
+
+  sandbox_client:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.client
+    container_name: ottergate-sandbox-client
+    runtime: runsc
+    volumes:
+      - ../config/resolv.conf:/etc/resolv.conf:ro
+      - ../config:/app/config:ro
+    networks:
+      sandbox_net:
+        ipv4_address: 172.20.0.100
+    depends_on:
+      ottergate:
+        condition: service_healthy
+
+  sandbox_client_2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.client
+    container_name: ottergate-sandbox-client-2
+    runtime: runsc
+    volumes:
+      - ../config/resolv.conf:/etc/resolv.conf:ro
+      - ../config:/app/config:ro
+    networks:
+      sandbox_net:
+        ipv4_address: 172.20.0.101
+    depends_on:
+      ottergate:
+        condition: service_healthy
+
+  mock_backend:
+    image: node:26-alpine
+    container_name: ottergate-mock-backend
+    volumes:
+      - ../config:/app/config
+      - ../tests:/app/tests
+    working_dir: /app
+    command: node /app/tests/mock_server.js
+    networks:
+      test_net:
+        ipv4_address: 172.21.0.100
+    depends_on:
+      ottergate:
+        condition: service_healthy
+
+networks:
+  sandbox_net:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+  test_net:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
+  external_net:
+    driver: bridge

@@ -1,0 +1,13 @@
+{
+  "runtimes": {
+    "runsc": {
+      "path": "/usr/local/bin/runsc",
+      "runtimeArgs": [
+        "--platform=ptrace"
+      ]
+    },
+    "crun": {
+      "path": "/usr/bin/crun"
+    }
+  }
+}
