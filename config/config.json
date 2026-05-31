@@ -71,7 +71,7 @@
     "enabled": true,
     "port": 8080,
     "socketPath": "",
-    "apiKey": "secure-control-plane-api-key",
+    "apiKey": null,
     "tls": null
   },
   "hosts": {
