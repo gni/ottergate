@@ -11,9 +11,8 @@ type IpBucket struct {
 }
 
 type RateLimiter struct {
-	mu            sync.Mutex
+	mu            sync.RWMutex
 	buckets       map[string]*IpBucket
-	keyList       []string // track key order for eviction
 	maxRequests   int
 	window        time.Duration
 	maxTrackedIps int
@@ -40,7 +39,6 @@ func (rl *RateLimiter) Destroy() {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	rl.buckets = nil
-	rl.keyList = nil
 }
 
 func (rl *RateLimiter) Allow(ip string) bool {
@@ -51,17 +49,14 @@ func (rl *RateLimiter) Allow(ip string) bool {
 	bucket, ok := rl.buckets[ip]
 
 	if !ok || now.After(bucket.ResetTime) {
-		// Evict oldest if capacity exceeded
-		for len(rl.buckets) >= rl.maxTrackedIps {
-			rl.evictOldest()
+		if len(rl.buckets) >= rl.maxTrackedIps {
+			rl.evictExpiredOrOldest(now)
 		}
 
-		bucket = &IpBucket{
+		rl.buckets[ip] = &IpBucket{
 			Count:     1,
 			ResetTime: now.Add(rl.window),
 		}
-		rl.buckets[ip] = bucket
-		rl.touchKey(ip)
 		return true
 	}
 
@@ -73,23 +68,26 @@ func (rl *RateLimiter) Allow(ip string) bool {
 	return true
 }
 
-func (rl *RateLimiter) touchKey(key string) {
-	for i, k := range rl.keyList {
-		if k == key {
-			rl.keyList = append(rl.keyList[:i], rl.keyList[i+1:]...)
-			break
+func (rl *RateLimiter) evictExpiredOrOldest(now time.Time) {
+	var oldestKey string
+	var oldestTime time.Time
+	first := true
+
+	for k, bucket := range rl.buckets {
+		if now.After(bucket.ResetTime) {
+			delete(rl.buckets, k)
+			return
+		}
+		if first || bucket.ResetTime.Before(oldestTime) {
+			oldestTime = bucket.ResetTime
+			oldestKey = k
+			first = false
 		}
 	}
-	rl.keyList = append(rl.keyList, key)
-}
 
-func (rl *RateLimiter) evictOldest() {
-	if len(rl.keyList) == 0 {
-		return
+	if oldestKey != "" {
+		delete(rl.buckets, oldestKey)
 	}
-	oldest := rl.keyList[0]
-	delete(rl.buckets, oldest)
-	rl.keyList = rl.keyList[1:]
 }
 
 func (rl *RateLimiter) startGarbageCollector() {
@@ -111,24 +109,9 @@ func (rl *RateLimiter) garbageCollect() {
 	defer rl.mu.Unlock()
 
 	now := time.Now()
-	expiredCount := 0
 	for ip, bucket := range rl.buckets {
 		if now.After(bucket.ResetTime) {
 			delete(rl.buckets, ip)
-			expiredCount++
 		}
 	}
-
-	if expiredCount == 0 {
-		return
-	}
-
-	// Single O(N) pass to filter out deleted keys from keyList
-	newKeyList := make([]string, 0, len(rl.buckets))
-	for _, ip := range rl.keyList {
-		if _, exists := rl.buckets[ip]; exists {
-			newKeyList = append(newKeyList, ip)
-		}
-	}
-	rl.keyList = newKeyList
 }

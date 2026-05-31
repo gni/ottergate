@@ -23,6 +23,7 @@ type ProxyCircuitBreaker struct {
 	threshold       int
 	resetTimeout    time.Duration
 	targetHost      string
+	trialInFlight   bool
 }
 
 func NewProxyCircuitBreaker(targetHost string) *ProxyCircuitBreaker {
@@ -41,11 +42,18 @@ func (cb *ProxyCircuitBreaker) Execute(action func() error) error {
 	if cb.state == StateOpen {
 		if now.Sub(cb.lastFailureTime) > cb.resetTimeout {
 			cb.state = StateHalfOpen
-			audit.Logger.System(cb.targetHost + " Circuit Breaker transitioned to HALF_OPEN")
+			cb.trialInFlight = true
+			audit.Logger.System(cb.targetHost + " Circuit Breaker transitioned to HALF_OPEN (Trial State Init)")
 		} else {
 			cb.mu.Unlock()
 			return errors.New("Target Offline (Circuit Breaker OPEN)")
 		}
+	} else if cb.state == StateHalfOpen {
+		if cb.trialInFlight {
+			cb.mu.Unlock()
+			return errors.New("Target Offline (Circuit Breaker HALF_OPEN Trial In-Flight)")
+		}
+		cb.trialInFlight = true
 	}
 	cb.mu.Unlock()
 
@@ -57,16 +65,16 @@ func (cb *ProxyCircuitBreaker) Execute(action func() error) error {
 	if err != nil {
 		cb.failures++
 		cb.lastFailureTime = time.Now()
-		if cb.failures >= cb.threshold && cb.state != StateOpen {
-			cb.state = StateOpen
-			audit.Logger.System(cb.targetHost + " Circuit Breaker transitioned to OPEN")
-		}
+		cb.state = StateOpen
+		cb.trialInFlight = false
+		audit.Logger.System(cb.targetHost + " Circuit Breaker transitioned to OPEN due to trial failure")
 		return err
 	}
 
 	if cb.state == StateHalfOpen {
 		cb.state = StateClosed
 		cb.failures = 0
+		cb.trialInFlight = false
 		audit.Logger.System(cb.targetHost + " Circuit Breaker transitioned to CLOSED")
 	}
 

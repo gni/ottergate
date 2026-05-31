@@ -52,7 +52,6 @@ type DnsHandler struct {
 	pendingUdpQueries map[uint16]*PendingUdpQuery
 	udpForwardsMu     sync.Mutex
 	maxUdpForwards    int
-	udpClient         *net.UDPConn
 }
 
 func NewDnsHandler(server *DevDnsServer, cfg *config.ServerConfig) *DnsHandler {
@@ -178,7 +177,6 @@ func (h *DnsHandler) Start() error {
 		if err != nil {
 			audit.Logger.Error(fmt.Sprintf("[DNS-TLS] TLS initialization bypassed: %s. DoT/DoH will not be handled.", err.Error()))
 		} else {
-			// Start DoT
 			dotAddr := fmt.Sprintf("0.0.0.0:%d", dotPort)
 			l, err := tls.Listen("tcp", dotAddr, tlsCfg)
 			if err != nil {
@@ -189,7 +187,6 @@ func (h *DnsHandler) Start() error {
 			audit.Logger.System(fmt.Sprintf("DoT (DNS over TLS) isolated boundary listening on port %d", dotPort))
 			go h.acceptLoop(h.dotListener)
 
-			// Start DoH
 			dohAddr := fmt.Sprintf("0.0.0.0:%d", dohPort)
 			mux := http.NewServeMux()
 			mux.HandleFunc("/dns-query", h.handleDohRequest)
@@ -225,9 +222,6 @@ func (h *DnsHandler) Stop() error {
 
 	if h.udpListener != nil {
 		_ = h.udpListener.Close()
-	}
-	if h.udpClient != nil {
-		_ = h.udpClient.Close()
 	}
 	if h.tcpListener != nil {
 		_ = h.tcpListener.Close()
@@ -268,22 +262,11 @@ func (h *DnsHandler) startUdp() error {
 	_ = l.SetReadBuffer(1024 * 1024)
 	h.udpListener = l
 
-	// Resolve local binding port
 	if h.port == 0 {
 		h.port = l.LocalAddr().(*net.UDPAddr).Port
 	}
 
-	// Create random UDP socket for client forwarding
-	cAddr, _ := net.ResolveUDPAddr("udp", "0.0.0.0:0")
-	cl, err := net.ListenUDP("udp", cAddr)
-	if err != nil {
-		_ = l.Close()
-		return err
-	}
-	h.udpClient = cl
-
 	go h.udpReadLoop()
-	go h.udpUpstreamResponseLoop()
 	return nil
 }
 
@@ -377,9 +360,9 @@ func Apply0x20Encoding(originalQuery []byte) ([]byte, []string) {
 				char := query[offset+j]
 				if (char >= 0x41 && char <= 0x5a) || (char >= 0x61 && char <= 0x7a) {
 					if entropy[j]%2 == 0 {
-						char |= 0x20 // lowercase
+						char |= 0x20
 					} else {
-						char &^= 0x20 // uppercase
+						char &^= 0x20
 					}
 					query[offset+j] = char
 				}
@@ -411,13 +394,13 @@ func AppendEdns0DoBit(query []byte) []byte {
 
 	encoder := NewDnsWireFormat(nil)
 	encoder.WriteBytes(query)
-	binary.BigEndian.PutUint16(encoder.Buf[10:12], 1) // ARCOUNT = 1
+	binary.BigEndian.PutUint16(encoder.Buf[10:12], 1)
 
-	encoder.WriteUint8(0)                  // Root name (0)
-	encoder.WriteUint16(config.DnsTypeOPT) // Type: OPT (41)
-	encoder.WriteUint16(4096)              // Class: UDP payload size (4096)
-	encoder.WriteUint32(DnssecDoBit)       // DO bit set (0x8000), TTL structure
-	encoder.WriteUint16(0)                  // RDLEN = 0
+	encoder.WriteUint8(0)
+	encoder.WriteUint16(config.DnsTypeOPT)
+	encoder.WriteUint16(4096)
+	encoder.WriteUint32(DnssecDoBit)
+	encoder.WriteUint16(0)
 
 	return encoder.Finish()
 }
@@ -445,7 +428,7 @@ func ParseResolvedIpv4s(resp []byte) []string {
 	for i := 0; i < int(an); i++ {
 		f.ReadDomainName()
 		qtype := f.readUint16()
-		f.Offset += 6 // skip class and ttl
+		f.Offset += 6
 		rdlen := f.readUint16()
 		if qtype == config.DnsTypeA && rdlen == 4 {
 			if f.Offset+4 <= len(resp) {
@@ -496,7 +479,6 @@ func (h *DnsHandler) resolveQueryAsync(query []byte, clientIp string) ([]byte, e
 	encoded, expectedNames := Apply0x20Encoding(query)
 	dnssecQuery := AppendEdns0DoBit(encoded)
 
-	// DNS-over-HTTPS Upstream Forwarding via UDP connection
 	rAddr, err := net.ResolveUDPAddr("udp", fallback+":53")
 	if err != nil {
 		return h.server.GenerateErrorResponse(query, config.DnsRcodeServFail), nil
@@ -522,13 +504,11 @@ func (h *DnsHandler) resolveQueryAsync(query []byte, clientIp string) ([]byte, e
 
 	msg := buf[:n]
 
-	// Verify DNSSEC
-	if !VerifyDnssecResponse(msg) {
+	if !VerifyDnssecResponse(msg, expectedNames, fw) {
 		audit.Logger.Error("Dropped upstream DoH fallback response: DNSSEC signature validation failed")
 		return h.server.GenerateErrorResponse(query, config.DnsRcodeServFail), nil
 	}
 
-	// Verify 0x20
 	responseQuestions := ExtractQuestions(msg)
 	valid0x20 := len(expectedNames) == len(responseQuestions)
 	if valid0x20 {
@@ -545,7 +525,6 @@ func (h *DnsHandler) resolveQueryAsync(query []byte, clientIp string) ([]byte, e
 		return h.server.GenerateErrorResponse(query, config.DnsRcodeServFail), nil
 	}
 
-	// Validate target firewall on resolved IPs
 	ips := ParseResolvedIpv4s(msg)
 	var blockedIp string
 	for _, ip := range ips {
@@ -607,7 +586,6 @@ func (h *DnsHandler) handleDohRequest(w http.ResponseWriter, r *http.Request) {
 		var err error
 		query, err = base64.RawURLEncoding.DecodeString(dnsParam)
 		if err != nil {
-			// Fallback standard Base64URL padding decode
 			query, err = base64.URLEncoding.DecodeString(dnsParam)
 			if err != nil {
 				w.WriteHeader(http.StatusBadRequest)
@@ -707,7 +685,6 @@ func (h *DnsHandler) forwardUdpQuery(data []byte, raddr *net.UDPAddr) {
 
 	clientIp := raddr.IP.String()
 
-	// Anti-Amplification check for WAN queries
 	if !h.isPrivateIp(clientIp) {
 		allowed := false
 		if fw != nil {
@@ -738,12 +715,10 @@ func (h *DnsHandler) forwardUdpQuery(data []byte, raddr *net.UDPAddr) {
 
 	originalID := binary.BigEndian.Uint16(data[0:2])
 
-	// Generate safe ephemeral ID for mapping
 	ephemeralBytes := make([]byte, 2)
 	_, _ = io.ReadFull(rand.Reader, ephemeralBytes)
 	ephemeralID := binary.BigEndian.Uint16(ephemeralBytes)
 
-	// Avoid duplicate maps
 	for {
 		if _, exists := h.pendingUdpQueries[ephemeralID]; !exists {
 			break
@@ -785,34 +760,35 @@ func (h *DnsHandler) forwardUdpQuery(data []byte, raddr *net.UDPAddr) {
 	}
 	h.udpForwardsMu.Unlock()
 
-	_, _ = h.udpClient.WriteToUDP(dnssecQuery, tAddress)
-}
-
-func (h *DnsHandler) udpUpstreamResponseLoop() {
-	buf := make([]byte, 4096)
-	for {
-		n, _, err := h.udpClient.ReadFromUDP(buf)
+	go func() {
+		dialer := net.Dialer{Timeout: 2 * time.Second}
+		conn, err := dialer.Dial("udp", tAddress.String())
 		if err != nil {
-			select {
-			case <-h.stopChan:
-				return
-			default:
-				continue
-			}
+			return
+		}
+		defer conn.Close()
+
+		_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+		if _, err := conn.Write(dnssecQuery); err != nil {
+			return
 		}
 
-		if n < 2 {
-			continue
+		respBuf := make([]byte, 4096)
+		n, err := conn.Read(respBuf)
+		if err != nil {
+			return
 		}
 
 		msg := make([]byte, n)
-		copy(msg, buf[:n])
-
-		go h.handleUdpUpstreamResponse(msg)
-	}
+		copy(msg, respBuf[:n])
+		h.handleUdpUpstreamResponse(msg)
+	}()
 }
 
 func (h *DnsHandler) handleUdpUpstreamResponse(msg []byte) {
+	if len(msg) < 2 {
+		return
+	}
 	ephemeralID := binary.BigEndian.Uint16(msg[0:2])
 
 	h.udpForwardsMu.Lock()
@@ -828,13 +804,15 @@ func (h *DnsHandler) handleUdpUpstreamResponse(msg []byte) {
 
 	pending.Timeout.Stop()
 
-	// Verify DNSSEC
-	if !VerifyDnssecResponse(msg) {
+	h.mu.Lock()
+	fw := h.cfg.Firewall
+	h.mu.Unlock()
+
+	if !VerifyDnssecResponse(msg, pending.ExpectedNames, fw) {
 		audit.Logger.Error("Dropped upstream UDP response: DNSSEC signature validation failed")
 		return
 	}
 
-	// Verify 0x20
 	responseQuestions := ExtractQuestions(msg)
 	valid0x20 := len(pending.ExpectedNames) == len(responseQuestions)
 	if valid0x20 {
@@ -851,14 +829,9 @@ func (h *DnsHandler) handleUdpUpstreamResponse(msg []byte) {
 		return
 	}
 
-	// Restore original transaction ID
 	restoredMsg := make([]byte, len(msg))
 	copy(restoredMsg, msg)
 	binary.BigEndian.PutUint16(restoredMsg[0:2], pending.OriginalID)
-
-	h.mu.Lock()
-	fw := h.cfg.Firewall
-	h.mu.Unlock()
 
 	ips := ParseResolvedIpv4s(restoredMsg)
 	var blockedIp string
@@ -947,7 +920,7 @@ func (h *DnsHandler) handleTcpConnection(conn net.Conn) {
 
 			if fallback != "" {
 				h.forwardTcpQuery(query, conn, clientIp)
-				return // connection is hijacked / finished by forwarder
+				return
 			} else {
 				nx := h.server.GenerateErrorResponse(query, config.DnsRcodeNxDomain)
 				prefixed := make([]byte, 2+len(nx))
@@ -958,7 +931,6 @@ func (h *DnsHandler) handleTcpConnection(conn net.Conn) {
 			}
 		}
 
-		// Reset keep-alive deadline
 		_ = conn.SetDeadline(time.Now().Add(h.idleTimeout))
 	}
 }
@@ -1012,14 +984,12 @@ func (h *DnsHandler) forwardTcpQuery(query []byte, clientConn net.Conn, clientIp
 		return
 	}
 
-	// Verify DNSSEC
-	if !VerifyDnssecResponse(resp) {
+	if !VerifyDnssecResponse(resp, expectedNames, fw) {
 		audit.Logger.Error("Dropped upstream TCP response: DNSSEC signature validation failed")
 		h.sendTcpError(clientConn, query, config.DnsRcodeServFail)
 		return
 	}
 
-	// Verify 0x20
 	responseQuestions := ExtractQuestions(resp)
 	valid0x20 := len(expectedNames) == len(responseQuestions)
 	if valid0x20 {
@@ -1069,8 +1039,6 @@ func (h *DnsHandler) forwardTcpQuery(query []byte, clientConn net.Conn, clientIp
 	rcode := int(binary.BigEndian.Uint16(resp[2:4]) & 0xf)
 	audit.Logger.DNS(clientIp, logQuestions, rcode, false, ParseResolvedIpv4s(resp), isLocal)
 
-	// Send result back to client
-	// We restore original transaction ID from client's query
 	origID := binary.BigEndian.Uint16(query[0:2])
 	binary.BigEndian.PutUint16(resp[0:2], origID)
 

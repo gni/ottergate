@@ -43,15 +43,16 @@ func getMasterKey() []byte {
 
 		if data, err := os.ReadFile(keyPath); err == nil {
 			trimmed := strings.TrimSpace(string(data))
-			h := sha256.Sum256([]byte(trimmed))
-			masterKey = h[:]
-			return
+			if len(trimmed) >= 32 {
+				h := sha256.Sum256([]byte(trimmed))
+				masterKey = h[:]
+				return
+			}
+			audit.Logger.Error("[SECURITY] Stored master key file contains insufficient entropy. Re-generating key block...")
 		}
 
-		// Generate a new persistent key
 		generated := make([]byte, 32)
 		if _, err := io.ReadFull(rand.Reader, generated); err != nil {
-			// Ephemeral fallback
 			fallback := make([]byte, 32)
 			_, _ = io.ReadFull(rand.Reader, fallback)
 			masterKey = fallback
@@ -69,7 +70,6 @@ func getMasterKey() []byte {
 			}
 		}
 
-		// Ephemeral fallback
 		fallback := make([]byte, 32)
 		_, _ = io.ReadFull(rand.Reader, fallback)
 		masterKey = fallback
@@ -108,8 +108,6 @@ func EncryptSecret(plaintext string) (string, error) {
 		return "", err
 	}
 
-	// In Go, GCM Seal appends the authenticated tag to the ciphertext.
-	// We must separate them to match the original layout: v1:nonce:tag:ciphertext
 	sealed := gcm.Seal(nil, nonce, []byte(plaintext), nil)
 	tagSize := gcm.Overhead()
 	ciphertext := sealed[:len(sealed)-tagSize]
@@ -153,7 +151,6 @@ func DecryptSecret(encrypted string) (string, error) {
 		return "", err
 	}
 
-	// Recombine ciphertext and tag for Go's GCM Open
 	sealed := append(ciphertext, tag...)
 	plaintext, err := gcm.Open(nil, nonce, sealed, nil)
 	if err != nil {
@@ -163,19 +160,15 @@ func DecryptSecret(encrypted string) (string, error) {
 	return string(plaintext), nil
 }
 
-// HKDF-SHA256 Implementation (RFC 5869)
 func HKDF(salt []byte, ikm []byte, info []byte, length int) []byte {
-	// If salt is empty, use a hash-len string of zeros
 	if len(salt) == 0 {
 		salt = make([]byte, sha256.Size)
 	}
 
-	// Step 1: Extract
 	mac := hmac.New(sha256.New, salt)
 	mac.Write(ikm)
 	prk := mac.Sum(nil)
 
-	// Step 2: Expand
 	okm := make([]byte, 0, length)
 	var t []byte
 	counter := byte(1)

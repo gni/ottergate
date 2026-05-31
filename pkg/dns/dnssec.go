@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 	"ottergate/pkg/audit"
+	"ottergate/pkg/config"
 )
 
 type ParsedRecord struct {
@@ -126,10 +127,9 @@ func extractRecords(buffer []byte) (qdcount int, answers, authorities, additiona
 	nscount := int(dw.ReadUint16())
 	arcount := int(dw.ReadUint16())
 
-	// Skip question section
 	for i := 0; i < qdcount; i++ {
 		dw.ReadDomainName()
-		dw.Offset += 4 // type and class
+		dw.Offset += 4
 	}
 
 	parseSection := func(count int) []ParsedRecord {
@@ -186,7 +186,6 @@ func verifySignature(rrsig *RRSIG, rrset []ParsedRecord, dnskey *DNSKEY) bool {
 	signedData = append(signedData, rrsigPrefix...)
 	signedData = append(signedData, signerNameCanonical...)
 
-	// Canonical RRSet Sorting: sort by RDATA lexicographically
 	sortedRrset := make([]ParsedRecord, len(rrset))
 	copy(sortedRrset, rrset)
 	sort.Slice(sortedRrset, func(i, j int) bool {
@@ -221,7 +220,7 @@ func verifySignature(rrsig *RRSIG, rrset []ParsedRecord, dnskey *DNSKEY) bool {
 	hasher.Write(signedData)
 	hashed := hasher.Sum(nil)
 
-	if rrsig.Algorithm == 8 { // RSA-SHA256
+	if rrsig.Algorithm == 8 {
 		pubKeyRaw := dnskey.PublicKey
 		if len(pubKeyRaw) < 2 {
 			return false
@@ -241,6 +240,11 @@ func verifySignature(rrsig *RRSIG, rrset []ParsedRecord, dnskey *DNSKEY) bool {
 		exponentBytes := pubKeyRaw[offset : offset+exponentLen]
 		modulusBytes := pubKeyRaw[offset+exponentLen:]
 
+		if len(modulusBytes) == 0 {
+			audit.Logger.Error("DNSSEC Cryptographic Violation: Zero modulus key exception rejected")
+			return false
+		}
+
 		var exp int
 		for _, b := range exponentBytes {
 			exp = (exp << 8) | int(b)
@@ -255,7 +259,7 @@ func verifySignature(rrsig *RRSIG, rrset []ParsedRecord, dnskey *DNSKEY) bool {
 		err := rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, hashed, rrsig.Signature)
 		return err == nil
 
-	} else if rrsig.Algorithm == 13 { // ECDSA-P256-SHA256
+	} else if rrsig.Algorithm == 13 {
 		pubKeyRaw := dnskey.PublicKey
 		if len(pubKeyRaw) != 64 {
 			return false
@@ -282,8 +286,8 @@ func verifySignature(rrsig *RRSIG, rrset []ParsedRecord, dnskey *DNSKEY) bool {
 }
 
 func calculateKeyTag(k *DNSKEY, rawRdata []byte) uint16 {
-	if k.Algorithm == 1 { // RSAMD5 tag calculation (unsupported, but preserved structure)
-		if len(k.PublicKey) < 3 {
+	if k.Algorithm == 1 {
+		if len(k.PublicKey) < 2 {
 			return 0
 		}
 		return uint16(k.PublicKey[len(k.PublicKey)-3])<<8 + uint16(k.PublicKey[len(k.PublicKey)-2])
@@ -301,7 +305,21 @@ func calculateKeyTag(k *DNSKEY, rawRdata []byte) uint16 {
 	return uint16(ac & 0xffff)
 }
 
-func VerifyDnssecResponse(buffer []byte) bool {
+func isHostConfigDomainSecure(domain string, fw *config.FirewallConfig) bool {
+	if fw == nil {
+		return false
+	}
+	normDomain := strings.ToLower(strings.TrimSuffix(domain, "."))
+	for _, pattern := range fw.AllowlistDomains {
+		normPattern := strings.ToLower(strings.TrimSuffix(pattern, "."))
+		if normPattern == normDomain || (strings.HasPrefix(normPattern, "*.") && strings.HasSuffix(normDomain, "."+normPattern[2:])) {
+			return true
+		}
+	}
+	return false
+}
+
+func VerifyDnssecResponse(buffer []byte, expectedNames []string, fw *config.FirewallConfig) bool {
 	_, answers, authorities, additionals, err := extractRecords(buffer)
 	if err != nil {
 		return false
@@ -316,15 +334,21 @@ func VerifyDnssecResponse(buffer []byte) bool {
 	var rrsigRecords []ParsedRecord
 
 	for _, r := range allRecords {
-		if r.Type == 48 { // DNSKEY
+		if r.Type == 48 {
 			dnskeyRecords = append(dnskeyRecords, r)
-		} else if r.Type == 46 { // RRSIG
+		} else if r.Type == 46 {
 			rrsigRecords = append(rrsigRecords, r)
 		}
 	}
 
 	if len(rrsigRecords) == 0 {
-		return true // No signature, allowed if unsigned domain (fallback)
+		for _, name := range expectedNames {
+			if isHostConfigDomainSecure(name, fw) {
+				audit.Logger.Error(fmt.Sprintf("DNSSEC Enforcement Downgrade Fault: Stripped signatures detected for secure zone %s", name))
+				return false
+			}
+		}
+		return true
 	}
 
 	for _, sigRec := range rrsigRecords {
@@ -333,7 +357,6 @@ func VerifyDnssecResponse(buffer []byte) bool {
 			continue
 		}
 
-		// Filter RRSet covered by this RRSIG
 		var coveredRrset []ParsedRecord
 		for _, rr := range answers {
 			if rr.Name == sigRec.Name && rr.Type == rrsig.TypeCovered {
@@ -344,7 +367,6 @@ func VerifyDnssecResponse(buffer []byte) bool {
 			continue
 		}
 
-		// Find matching DNSKEY
 		var matchingDnskey *DNSKEY
 		for _, kRec := range dnskeyRecords {
 			k, err := parseDnskey(kRec.Rdata)

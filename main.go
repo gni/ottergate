@@ -25,16 +25,19 @@ import (
 const CLI_VERSION = "0.1.15"
 
 type OttergateDaemon struct {
-	mu         sync.Mutex
-	dnsServer  *dns.DevDnsServer
-	dnsHandler *dns.DnsHandler
+	mu          sync.Mutex
+	cfg         *config.ServerConfig
+	dnsServer   *dns.DevDnsServer
+	dnsHandler  *dns.DnsHandler
 	httpHandler *proxy.HttpHandler
-	sniProxy   *proxy.SniProxyService
+	sniProxy    *proxy.SniProxyService
 }
 
 func (zd *OttergateDaemon) Start(cfg *config.ServerConfig) error {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
+
+	zd.cfg = cfg
 
 	dnsServer := dns.NewDevDnsServer(cfg)
 	dnsHandler := dns.NewDnsHandler(dnsServer, cfg)
@@ -172,8 +175,8 @@ Commands:
   config     Manage configuration state
 
 Config Commands:
-  ottergate config view                   Print the current configuration
-  ottergate config set <key> <value>      Set a configuration value using dot notation
+  ottergate config view                  Print the current configuration
+  ottergate config set <key> <value>       Set a configuration value using dot notation
                                        Example: ottergate config set port 53
                                        Example: ottergate config set controlPlane.port 8081
 
@@ -195,12 +198,12 @@ func handleInit(configPath string, isJson bool) {
 	}
 
 	defaultConf := map[string]interface{}{
-		"port":        53,
-		"httpPort":    80,
-		"httpsPort":   443,
-		"fallbackDns": "1.1.1.1",
+		"port":              53,
+		"httpPort":          80,
+		"httpsPort":         443,
+		"fallbackDns":       "1.1.1.1",
 		"maxTcpConnections": 100,
-		"tcpIdleTimeoutMs": 30000,
+		"tcpIdleTimeoutMs":  30000,
 		"controlPlane": map[string]interface{}{
 			"enabled":    true,
 			"socketPath": filepath.Join(os.TempDir(), "ottergate-cp.sock"),
@@ -394,9 +397,16 @@ func startEngine(configPath string, portOverride string, cpPortOverride string) 
 
 		cp.Subscribe(func(newCfg *config.ServerConfig) {
 			audit.Logger.System("Applying dynamic configuration update from Control Plane...")
+			daemon.mu.Lock()
+			oldCfg := daemon.cfg
+			daemon.mu.Unlock()
+
 			daemon.Stop()
 			if err := daemon.Start(newCfg); err != nil {
-				audit.Logger.Error(fmt.Sprintf("Failed to reload daemon with new configuration: %s", err.Error()))
+				audit.Logger.Error(fmt.Sprintf("Failed to reload daemon with new configuration: %s. Attempting fallback state rollback...", err.Error()))
+				if rollbackErr := daemon.Start(oldCfg); rollbackErr != nil {
+					audit.Logger.Error(fmt.Sprintf("CRITICAL FAILURE: Fallback rollback failed. System is offline: %s", rollbackErr.Error()))
+				}
 			}
 		})
 
@@ -416,7 +426,6 @@ func startEngine(configPath string, portOverride string, cpPortOverride string) 
 
 	audit.Logger.System("Initialization complete. Awaiting connections...")
 
-	// Trapping signals for graceful draining
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
@@ -453,7 +462,6 @@ func main() {
 	flag.StringVar(&portOverride, "p", "", "Override DNS port (shorthand)")
 	flag.StringVar(&cpPortOverride, "cp-port", "", "Override Control Plane port")
 
-	// Custom parsing to handle standard "ottergate start" command structure
 	flag.CommandLine.Usage = printUsage
 	flag.Parse()
 

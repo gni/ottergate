@@ -53,7 +53,6 @@ func NewControlPlane(
 	configFilePath string,
 	tlsCfg *config.TlsConfig,
 ) *ControlPlane {
-	// Derive HKDF Secrets
 	apiKeySecret := crypto.HKDF([]byte(blindIndexSalt), nil, []byte("api_key_derivation"), 32)
 	deviceSecret := crypto.HKDF([]byte(blindIndexSalt), nil, []byte("device_id_derivation"), 32)
 
@@ -194,7 +193,6 @@ func (cp *ControlPlane) Start() error {
 		}
 	}()
 
-	// Start dynamic Docker container log streaming background worker
 	go func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() {
@@ -223,18 +221,6 @@ func (cp *ControlPlane) Stop() error {
 func (cp *ControlPlane) verifyProofOfWork(nonce string, deviceHash string, payloadHash string) error {
 	timeWindow := time.Now().Unix() / 300
 
-	cp.mu.Lock()
-	if cp.currentPoWWindow != timeWindow {
-		cp.currentPoWWindow = timeWindow
-		cp.seenNonces = make(map[string]bool)
-	}
-
-	if cp.seenNonces[nonce] {
-		cp.mu.Unlock()
-		return errors.New("Proof of Work challenge nonce already used")
-	}
-	cp.mu.Unlock()
-
 	challenge := fmt.Sprintf("%s:%d:%s:%s", cp.blindIndexSalt, timeWindow, deviceHash, payloadHash)
 	h := sha256.New()
 	h.Write([]byte(challenge + nonce))
@@ -245,8 +231,17 @@ func (cp *ControlPlane) verifyProofOfWork(nonce string, deviceHash string, paylo
 	}
 
 	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	if cp.currentPoWWindow != timeWindow {
+		cp.currentPoWWindow = timeWindow
+		cp.seenNonces = make(map[string]bool)
+	}
+
+	if cp.seenNonces[nonce] {
+		return errors.New("Proof of Work challenge nonce already used")
+	}
+
 	cp.seenNonces[nonce] = true
-	cp.mu.Unlock()
 	return nil
 }
 
@@ -259,7 +254,6 @@ func (cp *ControlPlane) authenticate(r *http.Request, isMutation bool, bodyBytes
 		return "", errors.New("Missing API Key")
 	}
 
-	// Dynamic timing-safe API verification
 	mac := hmac.New(sha256.New, cp.apiKeySecret)
 	mac.Write([]byte(apiKey))
 	providedHash := hex.EncodeToString(mac.Sum(nil))
@@ -275,7 +269,6 @@ func (cp *ControlPlane) authenticate(r *http.Request, isMutation bool, bodyBytes
 		return "", errors.New("Authentication Validation Failed (Missing device id)")
 	}
 
-	// Compute device hash
 	macD := hmac.New(sha256.New, cp.deviceSecret)
 	macD.Write([]byte(deviceId))
 	deviceHash := hex.EncodeToString(macD.Sum(nil))
@@ -299,7 +292,6 @@ func (cp *ControlPlane) authenticate(r *http.Request, isMutation bool, bodyBytes
 func (cp *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	clientIp, _, _ := net.SplitHostPort(r.RemoteAddr)
 
-	// Block direct access to Control Plane from configured sandbox subnets
 	sandboxSubnetsEnv := os.Getenv("OTTERGATE_SANDBOX_SUBNETS")
 	if sandboxSubnetsEnv != "" {
 		ip := net.ParseIP(clientIp)
@@ -318,7 +310,6 @@ func (cp *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	method := r.Method
-
 	w.Header().Set("Content-Type", "application/json")
 
 	if r.URL.Path == "/metrics" {
@@ -357,7 +348,7 @@ func (cp *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var bodyBytes []byte
 
 		if isMutation {
-			limitReader := io.LimitReader(r.Body, 1048576) // 1MB limit
+			limitReader := io.LimitReader(r.Body, 1048576)
 			var err error
 			bodyBytes, err = io.ReadAll(limitReader)
 			if err != nil {
@@ -474,7 +465,6 @@ func (cp *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				cp.mu.Lock()
 				defer cp.mu.Unlock()
 
-				// AES-256-GCM memory encryption check on custom headers
 				for _, host := range newCfg.Hosts {
 					if host.HttpProxy != nil && host.HttpProxy.Headers != nil {
 						for k, v := range host.HttpProxy.Headers {
@@ -488,7 +478,6 @@ func (cp *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 
-				// Atomic File Writing: temp file + rename
 				tempPath := fmt.Sprintf("%s.tmp.%d", cp.configFilePath, time.Now().UnixNano())
 				tempFile, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 				if err != nil {
@@ -517,7 +506,6 @@ func (cp *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 				cp.cfg = newCfg
 
-				// Trigger callback subscribers to reload components
 				for _, callback := range cp.subscribers {
 					go func(cb func(*config.ServerConfig)) {
 						defer func() { _ = recover() }()

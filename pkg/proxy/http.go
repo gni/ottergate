@@ -105,7 +105,6 @@ func (h *HttpHandler) Start() error {
 		IdleTimeout:       h.idleTimeout,
 	}
 
-	// Register tcp connection tracking
 	h.server.ConnState = func(conn net.Conn, state http.ConnState) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -116,7 +115,6 @@ func (h *HttpHandler) Start() error {
 		}
 	}
 
-	// Support HTTP CONNECT proxying via hijacker hooks in ServeHTTP
 	go func() {
 		if err := h.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			audit.Logger.Error(fmt.Sprintf("HTTP Proxy server execution fault: %s", err.Error()))
@@ -146,7 +144,6 @@ func (h *HttpHandler) getCircuitBreaker(upstreamHost string) *ProxyCircuitBreake
 	defer h.mu.Unlock()
 
 	if len(h.circuitBreakers) >= 10000 {
-		// Evict first entry
 		for k := range h.circuitBreakers {
 			delete(h.circuitBreakers, k)
 			break
@@ -161,27 +158,31 @@ func (h *HttpHandler) getCircuitBreaker(upstreamHost string) *ProxyCircuitBreake
 	return cb
 }
 
+func (h *HttpHandler) normalizeUrlPath(urlStr string) string {
+	return strings.TrimSuffix(urlStr, "?")
+}
+
 func (h *HttpHandler) generateLoopToken(urlStr string, clientIp string) string {
+	target := h.normalizeUrlPath(urlStr)
 	window := time.Now().Unix() / 60
 	mac := hmac.New(sha256.New, []byte(h.loopSecret))
-	mac.Write([]byte(fmt.Sprintf("%s:%d", urlStr, window)))
+	mac.Write([]byte(fmt.Sprintf("%s:%s:%d", target, clientIp, window)))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func (h *HttpHandler) verifyLoopToken(token string, urlStr string, clientIp string) bool {
+	target := h.normalizeUrlPath(urlStr)
 	window := time.Now().Unix() / 60
 
-	// Check current window
 	mac0 := hmac.New(sha256.New, []byte(h.loopSecret))
-	mac0.Write([]byte(fmt.Sprintf("%s:%d", urlStr, window)))
+	mac0.Write([]byte(fmt.Sprintf("%s:%s:%d", target, clientIp, window)))
 	token0 := hex.EncodeToString(mac0.Sum(nil))
 
-	// Check previous window
 	mac1 := hmac.New(sha256.New, []byte(h.loopSecret))
-	mac1.Write([]byte(fmt.Sprintf("%s:%d", urlStr, window-1)))
+	mac1.Write([]byte(fmt.Sprintf("%s:%s:%d", target, clientIp, window-1)))
 	token1 := hex.EncodeToString(mac1.Sum(nil))
 
-	return token == token0 || token == token1
+	return hmac.Equal([]byte(token), []byte(token0)) || hmac.Equal([]byte(token), []byte(token1))
 }
 
 func (h *HttpHandler) findWildcardHost(cfg *config.ServerConfig, hostname string) (config.HostConfig, bool) {
@@ -295,9 +296,12 @@ func (h *HttpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	currCfg := h.cfg
 	h.mu.RUnlock()
 
-	// Check loop prevention header
 	providedLoopToken := r.Header.Get("X-Ottergate-Loop")
-	reqUrl := r.URL.Path + "?" + r.URL.RawQuery
+	reqUrl := r.URL.Path
+	if r.URL.RawQuery != "" {
+		reqUrl += "?" + r.URL.RawQuery
+	}
+
 	if providedLoopToken != "" {
 		if h.verifyLoopToken(providedLoopToken, reqUrl, clientIp) {
 			audit.Logger.HTTP(clientIp, r.Method, r.Host, reqUrl, 508, "Routing Loop Detected")
@@ -309,13 +313,11 @@ func (h *HttpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Handle HTTPS CONNECT tunnel
 	if r.Method == "CONNECT" {
 		h.handleConnect(w, r, currCfg)
 		return
 	}
 
-	// Handle regular requests
 	h.handleRequest(w, r, currCfg)
 }
 
@@ -412,7 +414,6 @@ func (h *HttpHandler) handleRequest(w http.ResponseWriter, r *http.Request, cfg 
 		return
 	}
 
-	// Resolve wildcard or exact host config
 	normalizedHost := strings.ToLower(strings.TrimSuffix(hostname, "."))
 	hostConfig, ok := cfg.Hosts[normalizedHost]
 	if !ok {
@@ -424,7 +425,6 @@ func (h *HttpHandler) handleRequest(w http.ResponseWriter, r *http.Request, cfg 
 	}
 
 	if ok {
-		// Handle Redirects
 		if hostConfig.Redirect != nil && hostConfig.Redirect.Enabled {
 			redirect := hostConfig.Redirect
 			_, err := h.validateTargetFirewall(redirect.Target, cfg)
@@ -439,7 +439,6 @@ func (h *HttpHandler) handleRequest(w http.ResponseWriter, r *http.Request, cfg 
 			return
 		}
 
-		// Handle Proxy Map Upstreams
 		if hostConfig.HttpProxy != nil && hostConfig.HttpProxy.Enabled && hostConfig.HttpProxy.Upstream != "" {
 			upstreamBase, err := url.Parse(hostConfig.HttpProxy.Upstream)
 			if err != nil {
@@ -471,7 +470,6 @@ func (h *HttpHandler) handleRequest(w http.ResponseWriter, r *http.Request, cfg 
 			customReqHeaders := make(map[string]string)
 			customResHeaders := make(map[string]string)
 
-			// Read decrypted secret headers
 			for k, v := range hostConfig.HttpProxy.Headers {
 				decrypted, err := crypto.DecryptSecret(v)
 				if err == nil {
@@ -488,7 +486,7 @@ func (h *HttpHandler) handleRequest(w http.ResponseWriter, r *http.Request, cfg 
 			customResHeaders["X-Frame-Options"] = "DENY"
 			customResHeaders["X-XSS-Protection"] = "1; mode=block"
 
-			maxBodyBytes := int64(5242880) // 5MB default
+			maxBodyBytes := int64(5242880)
 			if hostConfig.HttpProxy.MaxRequestBodyBytes > 0 {
 				maxBodyBytes = hostConfig.HttpProxy.MaxRequestBodyBytes
 			}
@@ -520,7 +518,6 @@ func (h *HttpHandler) handleRequest(w http.ResponseWriter, r *http.Request, cfg 
 		}
 	}
 
-	// Forward dynamic lookup
 	isLiteralIp := net.ParseIP(hostname) != nil
 	fw := cfg.Firewall
 
@@ -593,7 +590,6 @@ func (h *HttpHandler) doHttpProxy(
 	forwardBody bool,
 	cfg *config.ServerConfig,
 ) {
-	// Setup loop protection token
 	reqUrl := targetUrl.Path
 	if targetUrl.RawQuery != "" {
 		reqUrl += "?" + targetUrl.RawQuery
@@ -601,7 +597,6 @@ func (h *HttpHandler) doHttpProxy(
 	loopToken := h.generateLoopToken(reqUrl, clientIp)
 
 	executeProxy := func() error {
-		// Prepare upstream request
 		var bodyReader io.Reader
 		if forwardBody && r.Method != "GET" && r.Method != "HEAD" {
 			bodyReader = io.LimitReader(r.Body, maxBodyBytes)
@@ -646,7 +641,6 @@ func (h *HttpHandler) doHttpProxy(
 			return err
 		}
 
-		// Scrub hop-by-hop request headers
 		for k, vv := range r.Header {
 			lowerK := strings.ToLower(k)
 			isHop := false
@@ -671,7 +665,6 @@ func (h *HttpHandler) doHttpProxy(
 			}
 		}
 
-		// Inject custom config headers
 		for k, v := range customReqHeaders {
 			upReq.Header.Set(k, v)
 		}
@@ -682,7 +675,6 @@ func (h *HttpHandler) doHttpProxy(
 		}
 		defer resp.Body.Close()
 
-		// Prepare response headers
 		for k, vv := range resp.Header {
 			lowerK := strings.ToLower(k)
 			isHop := false
@@ -704,7 +696,6 @@ func (h *HttpHandler) doHttpProxy(
 			}
 		}
 
-		// Inject custom security headers
 		for k, v := range customResHeaders {
 			w.Header().Set(k, v)
 		}
@@ -712,7 +703,6 @@ func (h *HttpHandler) doHttpProxy(
 		w.WriteHeader(resp.StatusCode)
 		audit.Logger.HTTP(clientIp, r.Method, hostname, targetUrl.Path, resp.StatusCode, auditUrl)
 
-		// Read response body into w
 		_, _ = io.Copy(w, resp.Body)
 		return nil
 	}

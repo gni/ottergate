@@ -15,6 +15,8 @@ import (
 	"ottergate/pkg/audit"
 )
 
+const MaxLogFrameSize = 1048576
+
 type NetworkInfo struct {
 	IPAddress string `json:"IPAddress"`
 }
@@ -24,11 +26,11 @@ type NetworkSettings struct {
 }
 
 type DockerContainer struct {
-	ID              string           `json:"Id"`
-	Names           []string         `json:"Names"`
-	State           string           `json:"State"`
-	Image           string           `json:"Image"`
-	NetworkSettings NetworkSettings  `json:"NetworkSettings"`
+	ID              string          `json:"Id"`
+	Names           []string        `json:"Names"`
+	State           string          `json:"State"`
+	Image           string          `json:"Image"`
+	NetworkSettings NetworkSettings `json:"NetworkSettings"`
 }
 
 type ContainerIpMap struct {
@@ -41,13 +43,15 @@ var IPToName = &ContainerIpMap{
 }
 
 type DockerLogStreamer struct {
-	mu           sync.Mutex
+	mu            sync.Mutex
 	activeStreams map[string]context.CancelFunc
-	httpClient   *http.Client
+	httpClient    *http.Client
+	socketPath    string
 }
 
 var Streamer = &DockerLogStreamer{
 	activeStreams: make(map[string]context.CancelFunc),
+	socketPath:    "/var/run/docker.sock",
 	httpClient: &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -59,11 +63,14 @@ var Streamer = &DockerLogStreamer{
 }
 
 func (s *DockerLogStreamer) Start(ctx context.Context) {
-	// Wait a bit on startup for docker socket
 	time.Sleep(3 * time.Second)
-	audit.Logger.System("Docker socket listener started. Monitoring sandboxed container executions...")
 
-	// Run initial discovery immediately
+	if _, err := os.Stat(s.socketPath); os.IsNotExist(err) {
+		audit.Logger.System("Container monitoring loop suspended: Docker socket interface is detached for containment safety boundaries.")
+		return
+	}
+
+	audit.Logger.System("Docker socket listener started. Monitoring sandboxed container executions...")
 	s.discoverAndStream(ctx)
 
 	ticker := time.NewTicker(10 * time.Second)
@@ -75,6 +82,10 @@ func (s *DockerLogStreamer) Start(ctx context.Context) {
 			s.StopAll()
 			return
 		case <-ticker.C:
+			if _, err := os.Stat(s.socketPath); os.IsNotExist(err) {
+				s.StopAll()
+				return
+			}
 			s.discoverAndStream(ctx)
 		}
 	}
@@ -115,20 +126,17 @@ func (s *DockerLogStreamer) discoverAndStream(parentCtx context.Context) {
 	runningIds := make(map[string]bool)
 
 	for _, c := range containers {
-		// Ignore ottergate engine container itself
 		isOttergate := false
 		name := ""
 		if len(c.Names) > 0 {
 			name = strings.TrimPrefix(c.Names[0], "/")
 		}
 
-		// Robustly detect own container via hostname matching
 		hostname, _ := os.Hostname()
 		if hostname != "" && strings.HasPrefix(c.ID, hostname) {
 			isOttergate = true
 		}
 
-		// Fallback name matches
 		if strings.Contains(name, "ottergate-ottergate") {
 			isOttergate = true
 		}
@@ -137,7 +145,6 @@ func (s *DockerLogStreamer) discoverAndStream(parentCtx context.Context) {
 			continue
 		}
 
-		// Store IP mappings for this sandbox client
 		var ipAddress string
 		IPToName.Lock()
 		for _, netInfo := range c.NetworkSettings.Networks {
@@ -162,7 +169,6 @@ func (s *DockerLogStreamer) discoverAndStream(parentCtx context.Context) {
 		}
 	}
 
-	// Clean up stopped streams
 	for id, cancel := range s.activeStreams {
 		if !runningIds[id] {
 			cancel()
@@ -172,7 +178,6 @@ func (s *DockerLogStreamer) discoverAndStream(parentCtx context.Context) {
 }
 
 func (s *DockerLogStreamer) streamContainerLogs(ctx context.Context, id string, name string, ipAddress string) {
-	// Query logs: stdout, stderr, stream (follow), tail = 0 (only new logs)
 	urlPath := fmt.Sprintf("http://localhost/containers/%s/logs?stdout=true&stderr=true&follow=true&tail=5", id)
 	req, err := http.NewRequestWithContext(ctx, "GET", urlPath, nil)
 	if err != nil {
@@ -193,16 +198,17 @@ func (s *DockerLogStreamer) streamContainerLogs(ctx context.Context, id string, 
 		case <-ctx.Done():
 			return
 		default:
-			// Docker stream logs use a Multiplexed frame format (8-byte header):
-			// - [0] stream type: 0 = stdin, 1 = stdout, 2 = stderr
-			// - [1, 2, 3] ignored
-			// - [4, 5, 6, 7] payload size (uint32)
 			header := make([]byte, 8)
 			_, err := io.ReadFull(reader, header)
 			if err != nil {
 				return
 			}
 			size := binaryBigEndianUint32(header[4:8])
+			if size > MaxLogFrameSize {
+				audit.Logger.Error(fmt.Sprintf("Terminated log stream for container %s: frame size exception (%d bytes)", name, size))
+				return
+			}
+
 			payload := make([]byte, size)
 			_, err = io.ReadFull(reader, payload)
 			if err != nil {
@@ -214,14 +220,11 @@ func (s *DockerLogStreamer) streamContainerLogs(ctx context.Context, id string, 
 				continue
 			}
 
-			// Clean line of terminal escape characters if present
 			line = cleanLogLine(line)
 
-			// Check for gVisor trace (JSON or text containing execve/sys_enter_execve)
 			if strings.Contains(line, "execve") || strings.Contains(line, "sys_enter_execve") {
 				audit.Logger.AddCommandEvent(ipAddress, line)
 			} else {
-				// Record as generic sandbox action event
 				audit.GlobalBuffer.Add(audit.LogEvent{
 					Timestamp: time.Now(),
 					Type:      "command",
@@ -236,12 +239,11 @@ func (s *DockerLogStreamer) streamContainerLogs(ctx context.Context, id string, 
 }
 
 func binaryBigEndianUint32(b []byte) uint32 {
-	_ = b[3] // bounds check hint to compiler
+	_ = b[3]
 	return uint32(b[3]) | uint32(b[2])<<8 | uint32(b[1])<<16 | uint32(b[0])<<24
 }
 
 func cleanLogLine(line string) string {
-	// Simple ASCII clean
 	var sb strings.Builder
 	for _, r := range line {
 		if r >= 32 && r <= 126 {

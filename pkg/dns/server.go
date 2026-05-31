@@ -58,14 +58,12 @@ func (s *DevDnsServer) findHostConfig(normalizedName string) (config.HostConfig,
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Exact match check (avoiding wildcards)
 	if !strings.Contains(normalizedName, "*") {
 		if val, ok := s.cfg.Hosts[normalizedName]; ok {
 			return val, true
 		}
 	}
 
-	// Wildcard suffix matches (e.g. *.example.com)
 	labels := strings.Split(normalizedName, ".")
 	for i := 0; i < len(labels); i++ {
 		suffix := strings.Join(labels[i:], ".")
@@ -75,7 +73,6 @@ func (s *DevDnsServer) findHostConfig(normalizedName string) (config.HostConfig,
 		}
 	}
 
-	// Wildcard root match
 	if val, ok := s.cfg.Hosts["*"]; ok {
 		return val, true
 	}
@@ -170,7 +167,7 @@ func (s *DevDnsServer) buildSingleAnswer(r config.DnsRecord) []byte {
 	entry := make([]byte, 10+len(rdata))
 	binary.BigEndian.PutUint16(entry[0:2], s.toTypeNumber(r.Type))
 	binary.BigEndian.PutUint16(entry[2:4], config.DnsClassIn)
-	binary.BigEndian.PutUint32(entry[4:8], 300) // Default TTL 300 seconds
+	binary.BigEndian.PutUint32(entry[4:8], 300)
 	binary.BigEndian.PutUint16(entry[8:10], uint16(len(rdata)))
 	copy(entry[10:], rdata)
 
@@ -208,11 +205,19 @@ func BuildResponsePacket(id uint16, flags uint16, rcode int, questions []ParsedQ
 	encoder.WriteUint16(uint16(len(questions)))
 
 	answerCountOffset := encoder.Offset
-	encoder.WriteUint16(0) // placeholder for ancount
-	encoder.WriteUint16(0) // nscount
-	encoder.WriteUint16(0) // arcount
+	encoder.WriteUint16(0)
+	encoder.WriteUint16(0)
+	encoder.WriteUint16(0)
+
+	type offsetTracker struct {
+		name   string
+		offset uint16
+	}
+	var trackedOffsets []offsetTracker
 
 	for _, q := range questions {
+		currentOffset := uint16(encoder.Offset)
+		trackedOffsets = append(trackedOffsets, offsetTracker{name: strings.ToLower(q.Name), offset: currentOffset})
 		encoder.WriteDomainName(q.Name)
 		encoder.WriteUint16(q.Type)
 		encoder.WriteUint16(config.DnsClassIn)
@@ -223,8 +228,19 @@ func BuildResponsePacket(id uint16, flags uint16, rcode int, questions []ParsedQ
 		if len(ans) < 10 {
 			continue
 		}
-		encoder.WriteUint8(0xc0)
-		encoder.WriteUint8(0x0c) // compression pointer to original question
+		
+		targetQuestionIndex := int(ancount)
+		if targetQuestionIndex >= len(questions) {
+			targetQuestionIndex = len(questions) - 1
+		}
+
+		matchedOffset := uint16(12)
+		if targetQuestionIndex >= 0 && targetQuestionIndex < len(trackedOffsets) {
+			matchedOffset = trackedOffsets[targetQuestionIndex].offset
+		}
+
+		pointerValue := uint16(0xc000) | matchedOffset
+		encoder.WriteUint16(pointerValue)
 		encoder.WriteBytes(ans)
 		ancount++
 	}
@@ -244,12 +260,10 @@ func (s *DevDnsServer) Resolve(query []byte, sourceIp string) []byte {
 
 	flags := binary.BigEndian.Uint16(query[2:4])
 
-	// Check QR flag (must be 0 for query)
 	if (flags & 0x8000) != 0 {
 		return nil
 	}
 
-	// Check RD flag (must be 1 for recursion desired)
 	if (flags & 0x0100) == 0 {
 		return nil
 	}
@@ -274,14 +288,12 @@ func (s *DevDnsServer) Resolve(query []byte, sourceIp string) []byte {
 		}{Name: q.Name, Type: s.toTypeString(q.Type)})
 	}
 
-	// Cache Check
 	cacheKey := s.cache.GenerateCacheKey(questions)
 	if cachedBytes, _, ok := s.cache.Get(cacheKey); ok {
 		cachedRcode := int(binary.BigEndian.Uint16(cachedBytes[2:4]) & 0xf)
 		isLocal := len(logQuestions) > 0 && s.IsLocalHost(logQuestions[0].Name)
 		audit.Logger.DNS(sourceIp, logQuestions, cachedRcode, true, ParseResolvedIpv4s(cachedBytes), isLocal)
 
-		// Create a copy of the cached bytes and rewrite the transaction ID to match the current query
 		responseCopy := make([]byte, len(cachedBytes))
 		copy(responseCopy, cachedBytes)
 		if len(query) >= 2 {
@@ -319,7 +331,6 @@ func (s *DevDnsServer) Resolve(query []byte, sourceIp string) []byte {
 	fallbackDns := s.cfg.FallbackDns
 	s.mu.RUnlock()
 
-	// If no match found and all questions are unknown, evaluate firewall rules and fallback
 	if !hasAnyMatch && allQuestionsUnknown {
 		allowed := true
 		for _, q := range questions {
@@ -346,7 +357,7 @@ func (s *DevDnsServer) Resolve(query []byte, sourceIp string) []byte {
 			return resp
 		}
 
-		return nil // Trigger forwarder fallback
+		return nil
 	}
 
 	id := binary.BigEndian.Uint16(query[0:2])

@@ -27,6 +27,9 @@ func IsValidHostname(hostname string) bool {
 		return false
 	}
 	parts := strings.Split(hostname, ".")
+	if len(parts) > 16 {
+		return false
+	}
 	for _, part := range parts {
 		if len(part) == 0 || len(part) > 63 || !labelRegex.MatchString(part) {
 			return false
@@ -69,6 +72,9 @@ func ValidateDnsRecord(r DnsRecord) error {
 	case "TXT":
 		if len(r.Data) == 0 {
 			return ConfigValidationError{Msg: "TXT record must contain data"}
+		}
+		if len(r.Data) > 128 {
+			return ConfigValidationError{Msg: "TXT record chunks density exceeds allocation boundary policy"}
 		}
 		totalLen := 0
 		for _, d := range r.Data {
@@ -142,6 +148,9 @@ func ValidateHttpProxy(hp *HttpProxyConfig) error {
 		if len(hp.Upstream) > 8192 {
 			return ConfigValidationError{Msg: "HTTP proxy upstream URL too long"}
 		}
+	}
+	if len(hp.Headers) > 64 {
+		return ConfigValidationError{Msg: "HTTP proxy metadata boundary capacity exceeded"}
 	}
 	for k, v := range hp.Headers {
 		if len(k) > 256 || !headerNameRegex.MatchString(k) {
@@ -243,6 +252,9 @@ func ValidateServerConfig(c *ServerConfig) error {
 		if f.DefaultPolicy != "allow" && f.DefaultPolicy != "deny" {
 			return ConfigValidationError{Msg: fmt.Sprintf("invalid firewall defaultPolicy: %s", f.DefaultPolicy)}
 		}
+		if len(f.AllowlistDomains) > 1000 || len(f.BlocklistDomains) > 1000 {
+			return ConfigValidationError{Msg: "firewall domain metadata count policy limit violation"}
+		}
 		for _, d := range f.AllowlistDomains {
 			if len(d) > 253 {
 				return ConfigValidationError{Msg: "firewall domain too long"}
@@ -253,6 +265,9 @@ func ValidateServerConfig(c *ServerConfig) error {
 				return ConfigValidationError{Msg: "firewall domain too long"}
 			}
 		}
+		if len(f.AllowlistRanges) > 1000 || len(f.BlocklistRanges) > 1000 {
+			return ConfigValidationError{Msg: "firewall network range capacity limit violation"}
+		}
 		for _, r := range f.AllowlistRanges {
 			if _, _, err := net.ParseCIDR(r); err != nil {
 				return ConfigValidationError{Msg: fmt.Sprintf("invalid firewall allowlist CIDR: %s", r)}
@@ -262,6 +277,9 @@ func ValidateServerConfig(c *ServerConfig) error {
 			if _, _, err := net.ParseCIDR(r); err != nil {
 				return ConfigValidationError{Msg: fmt.Sprintf("invalid firewall blocklist CIDR: %s", r)}
 			}
+		}
+		if len(f.AllowlistIps) > 1000 || len(f.BlocklistIps) > 1000 {
+			return ConfigValidationError{Msg: "firewall address registry size limit violation"}
 		}
 		for _, ip := range f.AllowlistIps {
 			if !IsValidIPv4(ip) && !IsValidIPv6(ip) {
@@ -320,6 +338,10 @@ func ValidateServerConfig(c *ServerConfig) error {
 		}
 	}
 
+	if len(c.Hosts) > 5000 {
+		return ConfigValidationError{Msg: "hosts mapping allocation policy volume violation"}
+	}
+
 	normalizedHosts := make(map[string]HostConfig)
 	for key, hc := range c.Hosts {
 		normalized := strings.ToLower(strings.TrimSuffix(key, "."))
@@ -333,6 +355,9 @@ func ValidateServerConfig(c *ServerConfig) error {
 					return ConfigValidationError{Msg: fmt.Sprintf("invalid hostname in configuration key: %s", key)}
 				}
 			}
+		}
+		if len(hc.Records) > 64 {
+			return ConfigValidationError{Msg: "maximum records density capacity exceeded per routing label unit"}
 		}
 		for _, r := range hc.Records {
 			if err := ValidateDnsRecord(r); err != nil {

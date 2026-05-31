@@ -130,7 +130,6 @@ func (dw *DnsWireFormat) ReadDomainName() string {
 			break
 		}
 
-		// Compression pointer check: 0xc0
 		if (length & 0xc0) == 0xc0 {
 			jumps++
 			if jumps > maxJumps {
@@ -209,7 +208,12 @@ func EncodeTXT(data []string) []byte {
 	encoder := NewDnsWireFormat(nil)
 	for _, txt := range data {
 		bytes := []byte(txt)
-		encoder.WriteUint8(uint8(len(bytes)))
+		chunkLen := len(bytes)
+		if chunkLen > 255 {
+			chunkLen = 255
+			bytes = bytes[:255]
+		}
+		encoder.WriteUint8(uint8(chunkLen))
 		encoder.WriteBytes(bytes)
 	}
 	return encoder.Finish()
@@ -261,7 +265,7 @@ func parseQuestion(query []byte, baseOffset int) (*ParsedQuestion, error) {
 	qtype := decoder.ReadUint16()
 	qclass := decoder.ReadUint16()
 
-	if qclass != 1 && qclass != 255 { // Class IN or ANY
+	if qclass != 1 && qclass != 255 {
 		return nil, errors.New("unsupported DNS class")
 	}
 
