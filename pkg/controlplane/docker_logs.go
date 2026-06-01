@@ -198,6 +198,28 @@ func (s *DockerLogStreamer) streamContainerLogs(ctx context.Context, id string, 
 		s.mu.Unlock()
 	}()
 
+	// Inspect the container to see if TTY is enabled
+	reqInspect, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost/containers/%s/json", id), nil)
+	if err != nil {
+		return
+	}
+	respInspect, err := s.httpClient.Do(reqInspect)
+	if err != nil {
+		return
+	}
+	var inspect struct {
+		Config struct {
+			Tty bool `json:"Tty"`
+		} `json:"Config"`
+	}
+	err = json.NewDecoder(respInspect.Body).Decode(&inspect)
+	respInspect.Body.Close()
+	if err != nil {
+		return
+	}
+	isTty := inspect.Config.Tty
+
+	// 2. Stream logs
 	urlPath := fmt.Sprintf("http://localhost/containers/%s/logs?stdout=true&stderr=true&follow=true&tail=5", id)
 	req, err := http.NewRequestWithContext(ctx, "GET", urlPath, nil)
 	if err != nil {
@@ -211,6 +233,36 @@ func (s *DockerLogStreamer) streamContainerLogs(ctx context.Context, id string, 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		return
+	}
+
+	if isTty {
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				line := scanner.Text()
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				line = cleanLogLine(line)
+				if strings.Contains(line, "execve") || strings.Contains(line, "sys_enter_execve") {
+					audit.Logger.AddCommandEvent(ipAddress, line)
+				} else {
+					audit.GlobalBuffer.Add(audit.LogEvent{
+						Timestamp: time.Now(),
+						Type:      "command",
+						ClientIP:  ipAddress,
+						Details:   line,
+						Status:    "info",
+						Target:    "output",
+					})
+				}
+			}
+		}
 		return
 	}
 
