@@ -1,16 +1,17 @@
 #!/bin/bash
 set -e
 
-# 1. Aggressively purge stale lockfiles from previous dirty terminations (Exit 137)
 echo "[dind-entrypoint] Purging stale process locks..."
 rm -f /var/run/docker.pid /var/run/docker/containerd/containerd.pid
 
-# 2. Start nested Docker daemon in the background
+echo "[dind-entrypoint] Bootstrapping gVisor telemetry directories..."
+mkdir -p /var/log/gvisor
+chmod 0777 /var/log/gvisor
+
 echo "[dind-entrypoint] Starting nested Docker daemon..."
 dockerd-entrypoint.sh &
 DOCKERD_PID=$!
 
-# 3. Intercept SIGTERM/SIGINT and gracefully forward to the daemon
 trap 'echo "[dind-entrypoint] Intercepted stop signal. Gracefully draining inner dockerd..."; kill -TERM $DOCKERD_PID; wait $DOCKERD_PID; exit 0' SIGTERM SIGINT
 
 echo "[dind-entrypoint] Waiting for Docker daemon to initialize..."
@@ -53,8 +54,6 @@ echo "[dind-entrypoint] Starting Ottergate and sandbox clients via inner Docker 
 docker compose -p app -f /app/docker/docker-compose.inner.yml up -d --build
 
 echo "[dind-entrypoint] System initialized successfully. Streaming inner logs:"
-# Run logs in the background so the script doesn't block the trap execution
 docker compose -p app -f /app/docker/docker-compose.inner.yml logs -f &
 
-# 4. Block the entrypoint execution until dockerd terminates or a trap is triggered
 wait $DOCKERD_PID

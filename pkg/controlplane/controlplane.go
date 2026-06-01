@@ -310,7 +310,6 @@ func (cp *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	method := r.Method
-	w.Header().Set("Content-Type", "application/json")
 
 	if r.URL.Path == "/metrics" {
 		if method != "GET" {
@@ -327,6 +326,7 @@ func (cp *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(fmt.Sprintf(`{"status":"healthy","timestamp":%d}`, time.Now().Unix())))
 		return
@@ -344,6 +344,7 @@ func (cp *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if strings.HasPrefix(r.URL.Path, "/api/v1/") {
+		w.Header().Set("Content-Type", "application/json")
 		isMutation := method == "PUT" || method == "POST"
 		var bodyBytes []byte
 
@@ -524,4 +525,7 @@ func (cp *ControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"error":"Endpoint Not Found"}`))
 		return
 	}
+
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = w.Write([]byte(`{"error":"Endpoint Not Found"}`))
 }

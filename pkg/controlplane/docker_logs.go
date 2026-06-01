@@ -8,6 +8,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -67,7 +70,6 @@ func (s *DockerLogStreamer) Start(ctx context.Context) {
 
 	audit.Logger.System("Initializing Docker socket telemetry connection...")
 
-	// Resilient startup: Ping the containers endpoint directly.
 	for {
 		req, err := http.NewRequestWithContext(ctx, "GET", "http://localhost/containers/json", nil)
 		if err == nil {
@@ -102,7 +104,6 @@ func (s *DockerLogStreamer) Start(ctx context.Context) {
 			s.StopAll()
 			return
 		case <-ticker.C:
-			// Continuous discovery of new or restarted containers
 			s.discoverAndStream(ctx)
 		}
 	}
@@ -166,7 +167,6 @@ func (s *DockerLogStreamer) discoverAndStream(parentCtx context.Context) {
 			}
 		}
 		
-		// Deterministic Fallback: Force map the name if container hasn't bound an IP yet
 		if !hasIp {
 			ipAddress = name
 			IPToName.Map[ipAddress] = name
@@ -180,6 +180,7 @@ func (s *DockerLogStreamer) discoverAndStream(parentCtx context.Context) {
 			s.activeStreams[c.ID] = cancel
 			audit.Logger.System(fmt.Sprintf("Discovered container %s (%s) IP %s. Starting log stream listener...", name, c.ID[:12], ipAddress))
 			go s.streamContainerLogs(ctx, c.ID, name, ipAddress)
+			go s.streamGvisorLogs(ctx, c.ID, name, ipAddress)
 		}
 	}
 
@@ -191,6 +192,54 @@ func (s *DockerLogStreamer) discoverAndStream(parentCtx context.Context) {
 	}
 }
 
+func (s *DockerLogStreamer) streamGvisorLogs(ctx context.Context, id string, name string, ipAddress string) {
+	dir := filepath.Join("/var/log/gvisor", id)
+	tails := make(map[string]int64)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			files, err := filepath.Glob(filepath.Join(dir, "runsc.log.*"))
+			if err != nil || len(files) == 0 {
+				continue
+			}
+			for _, file := range files {
+				info, err := os.Stat(file)
+				if err != nil {
+					continue
+				}
+				lastPos := tails[file]
+				if info.Size() > lastPos {
+					f, err := os.Open(file)
+					if err == nil {
+						_, _ = f.Seek(lastPos, io.SeekStart)
+						scanner := bufio.NewScanner(f)
+						for scanner.Scan() {
+							line := strings.TrimSpace(scanner.Text())
+							if line == "" {
+								continue
+							}
+							if strings.Contains(line, "sys_execve") || 
+							   strings.Contains(line, "sys_connect") || 
+							   strings.Contains(line, "sys_socket") || 
+							   strings.Contains(line, "sys_clone") || 
+							   strings.Contains(line, "sys_ptrace") {
+								audit.Logger.AddCommandEvent(ipAddress, "[gvisor-trace] " + cleanLogLine(line))
+							}
+						}
+						tails[file] = info.Size()
+						_ = f.Close()
+					}
+				}
+			}
+		}
+	}
+}
+
 func (s *DockerLogStreamer) streamContainerLogs(ctx context.Context, id string, name string, ipAddress string) {
 	defer func() {
 		s.mu.Lock()
@@ -198,7 +247,6 @@ func (s *DockerLogStreamer) streamContainerLogs(ctx context.Context, id string, 
 		s.mu.Unlock()
 	}()
 
-	// Inspect the container to see if TTY is enabled
 	reqInspect, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost/containers/%s/json", id), nil)
 	if err != nil {
 		return
@@ -219,7 +267,6 @@ func (s *DockerLogStreamer) streamContainerLogs(ctx context.Context, id string, 
 	}
 	isTty := inspect.Config.Tty
 
-	// 2. Stream logs
 	urlPath := fmt.Sprintf("http://localhost/containers/%s/logs?stdout=true&stderr=true&follow=true&tail=5", id)
 	req, err := http.NewRequestWithContext(ctx, "GET", urlPath, nil)
 	if err != nil {
@@ -317,7 +364,11 @@ func binaryBigEndianUint32(b []byte) uint32 {
 	return uint32(b[3]) | uint32(b[2])<<8 | uint32(b[1])<<16 | uint32(b[0])<<24
 }
 
+var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
+
 func cleanLogLine(line string) string {
+	line = ansiRegex.ReplaceAllString(line, "")
+
 	var sb strings.Builder
 	for _, r := range line {
 		if r >= 32 && r <= 126 {
