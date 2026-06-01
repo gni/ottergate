@@ -9,7 +9,7 @@ This project is a Go port of the original Node.js implementation: [zonzon](https
 ## How it works
 
 ```
-[ Sandbox Client ] ---> ( Ottergate Gateway ) ---> [ Public Internet ]
+[ Sandbox Client ] ---> ( Ottergate ) ---> [ Public Internet ]
 ```
 
 1. **System Call Isolation**: Your sandbox runtime (e.g., gVisor / `runsc`) isolates the OS kernel.
@@ -59,8 +59,27 @@ Configurations are stored in `config/config.json`:
       "*.openai.com",
       "*.github.com"
     ],
+    "blocklist_domains": [
+      "*.malicious-domain.example",
+      "malicious-domain.example"
+    ],
+    "allowlist_ips": [
+      "127.0.0.1",
+      "172.21.0.100"
+    ],
+    "blocklist_ips": [
+      "169.254.169.254",
+      "100.100.100.200"
+    ],
+    "allowlist_ranges": [
+      "0.0.0.0/0",
+      "127.0.0.0/8"
+    ],
     "blocklist_ranges": [
       "10.0.0.0/8",
+      "172.16.0.0/12",
+      "192.168.0.0/16",
+      "127.0.0.0/8",
       "169.254.0.0/16"
     ]
   }

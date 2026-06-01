@@ -95,7 +95,7 @@ func TestCalculateKeyTag(t *testing.T) {
 func TestVerifyDnssecResponseNoSignatures(t *testing.T) {
 	// Mock an empty DNS response payload with standard headers (QDCOUNT=0, ANCOUNT=0, NSCOUNT=0, ARCOUNT=0)
 	emptyResp := make([]byte, 12)
-	ok := VerifyDnssecResponse(emptyResp)
+	ok := VerifyDnssecResponse(emptyResp, []string{"test.local"}, nil)
 	if !ok {
 		t.Error("VerifyDnssecResponse returned false for empty signatures response, expected true (unsigned domains fallback)")
 	}
@@ -148,7 +148,7 @@ func TestVerifyDnssecResponseInvalidDnskey(t *testing.T) {
 	dnsPacket := buffer[:offset]
 
 	// Verify validation fails closed because matching DNSKEY is missing
-	ok := VerifyDnssecResponse(dnsPacket)
+	ok := VerifyDnssecResponse(dnsPacket, []string{"test.local"}, nil)
 	if ok {
 		t.Error("VerifyDnssecResponse succeeded without matching DNSKEY record, expected fail-closed")
 	}
