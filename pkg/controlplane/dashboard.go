@@ -815,7 +815,6 @@ const DashboardHTML = `<!DOCTYPE html>
     </style>
 </head>
 <body>
-    <!-- Auth API Key Portal -->
     <div class="auth-overlay" id="authOverlay">
         <div class="auth-card">
             <h2 class="auth-title">ottergate // authorize</h2>
@@ -834,7 +833,6 @@ const DashboardHTML = `<!DOCTYPE html>
         </div>
     </div>
 
-    <!-- Proof of Work Challenge Loading Banner -->
     <div class="pow-overlay" id="powOverlay">
         <div class="pow-card">
             <div class="pow-spinner"></div>
@@ -844,11 +842,10 @@ const DashboardHTML = `<!DOCTYPE html>
     </div>
 
     <div class="app-frame">
-        <!-- Sidebar context links -->
         <aside class="sidebar" id="appSidebar">
             <div class="brand-section">
                 <h1 class="brand-title">ottergate</h1>
-                <p class="brand-desc">Enterprise Sandbox Gate</p>
+                <p class="brand-desc">sandbox</p>
                 <div class="theme-toggle-container">
                     <button class="theme-btn" onclick="toggleTheme()" title="Toggle Dark/Light Mode">
                         🌓 Toggle Dark Mode
@@ -877,7 +874,6 @@ const DashboardHTML = `<!DOCTYPE html>
             </div>
         </aside>
 
-        <!-- Main Dashboard Area -->
         <main class="workspace">
             <header class="workspace-header">
                 <div class="header-title">
@@ -891,7 +887,6 @@ const DashboardHTML = `<!DOCTYPE html>
                 </div>
             </header>
 
-            <!-- Metrics stats row (specific to logs telemetry tab) -->
             <section class="stats-grid" id="statsGrid">
                 <div class="stat-block">
                     <span class="stat-label">Total Events</span>
@@ -911,9 +906,7 @@ const DashboardHTML = `<!DOCTYPE html>
                 </div>
             </section>
 
-            <!-- Telemetry feed pane columns -->
             <div class="feed-split" id="telemetrySplit">
-                <!-- Left Pane: Firewall Logs -->
                 <section class="feed-pane">
                     <header class="feed-pane-header">
                         <h3 class="feed-pane-title">Traffic & Violations</h3>
@@ -930,7 +923,6 @@ const DashboardHTML = `<!DOCTYPE html>
                     </div>
                 </section>
 
-                <!-- Right Pane: Live Syscall Tracing -->
                 <section class="feed-pane">
                     <header class="feed-pane-header">
                         <h3 class="feed-pane-title">gVisor Syscall Trace</h3>
@@ -941,7 +933,6 @@ const DashboardHTML = `<!DOCTYPE html>
                 </section>
             </div>
 
-            <!-- Configuration raw JSON editor layout -->
             <div class="config-layout" id="configLayout" style="padding: 24px; display: none;">
                 <div class="config-section" style="flex: 1; display: flex; flex-direction: column; height: 100%;">
                     <h3 class="config-section-title">Infrastructure Configuration</h3>
@@ -960,23 +951,20 @@ const DashboardHTML = `<!DOCTYPE html>
                 </div>
             </div>
 
-            <!-- Core control plane diagnostics tab -->
             <div class="core-layout" id="coreLayout">
                 <div class="core-grid">
-                    <!-- Flow chart scheme card -->
                     <div class="config-section" style="grid-column: span 2;">
                         <h3 class="config-section-title">Operational Data Flow Pipeline</h3>
                         <div style="font-family: var(--font-mono); font-size: 11px; background: rgba(0,0,0,0.02); padding: 20px; border: 1px solid var(--border-color); line-height: 1.8; color: var(--primary); overflow-x: auto; border-radius: var(--radius);">
                             <pre style="margin: 0; white-space: pre;">
   [ Workstation Browser ] ───( X-Api-Key )───► [ Timing-Safe HMAC Guard ] ───( X-Pow-Nonce )───► [ Atomic Configuration Persistence ]
-                                                      │                                                 │
-                                                      ▼                                                 ▼
-                                              [ API AUTH: OK ]                                  [ DAEMON LIVE RELOAD ]
+                                                      │                                                │
+                                                      ▼                                                ▼
+                                              [ API AUTH: OK ]                                 [ DAEMON LIVE RELOAD ]
                             </pre>
                         </div>
                     </div>
 
-                    <!-- System Core Status parameters -->
                     <div class="config-section">
                         <h3 class="config-section-title">System Core Parameters</h3>
                         <div style="font-family: var(--font-mono); font-size: 12px; line-height: 2.2; color: var(--text-main); opacity: 0.95;">
@@ -988,7 +976,6 @@ const DashboardHTML = `<!DOCTYPE html>
                         </div>
                     </div>
 
-                    <!-- Cryptographic Active Keychain parameters -->
                     <div class="config-section">
                         <h3 class="config-section-title">Active Cryptographic Keyring</h3>
                         <div style="font-family: var(--font-mono); font-size: 12px; line-height: 2.2; color: var(--text-main); opacity: 0.95;">
@@ -999,7 +986,6 @@ const DashboardHTML = `<!DOCTYPE html>
                         </div>
                     </div>
 
-                    <!-- gVisor Sandboxing diagnostic panel -->
                     <div class="config-section" style="grid-column: span 2;">
                         <h3 class="config-section-title">gVisor Secure Sandbox Isolation Status</h3>
                         <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; font-family: var(--font-sans); font-size: 13px;">
@@ -1040,6 +1026,16 @@ const DashboardHTML = `<!DOCTYPE html>
         let discoveredClients = {};
         let activeTab = 'telemetry';
         let serverConfig = null;
+
+        // Custom string hasher to generate deterministic DOM IDs
+        function hashCode(str) {
+            let hash = 0;
+            for (let i = 0; i < str.length; i++) {
+                hash = ((hash << 5) - hash) + str.charCodeAt(i);
+                hash |= 0; 
+            }
+            return Math.abs(hash);
+        }
 
         function escapeHtml(str) {
             if (!str) return '';
@@ -1290,8 +1286,9 @@ const DashboardHTML = `<!DOCTYPE html>
             for (let i = filtered.length - 1; i >= 0; i--) {
                 const log = filtered[i];
                 const cleanTarget = (log.target || '').replace(/[^a-zA-Z0-9]/g, '');
-                const cleanDetails = (log.details || '').replace(/[^a-zA-Z0-9]/g, '');
-                const logId = 'log_' + log.timestamp.replace(/[^a-zA-Z0-9]/g, '') + '_' + log.type + '_' + cleanTarget + '_' + cleanDetails.substring(0, 10);
+                
+                // Deterministic ID generation using hash collision resistance instead of array loops
+                const logId = 'log_' + log.timestamp.replace(/[^a-zA-Z0-9]/g, '') + '_' + hashCode(log.details || '');
                 activeIds.add(logId);
 
                 if (!document.getElementById(logId)) {
@@ -1365,9 +1362,9 @@ const DashboardHTML = `<!DOCTYPE html>
             const chronological = [...cmdLogs].reverse();
             let addedNew = false;
 
-            chronological.forEach(log => {
-                const cleanDetails = (log.details || '').replace(/[^a-zA-Z0-9]/g, '');
-                const cmdId = 'cmd_' + log.timestamp.replace(/[^a-zA-Z0-9]/g, '') + '_' + cleanDetails.substring(0, 20);
+            chronological.forEach((log) => {
+                // Deterministic ID generation using hash collision resistance
+                const cmdId = 'cmd_' + log.timestamp.replace(/[^a-zA-Z0-9]/g, '') + '_' + hashCode(log.details || '');
 
                 if (!document.getElementById(cmdId)) {
                     const line = document.createElement('div');

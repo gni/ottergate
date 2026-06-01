@@ -17,6 +17,7 @@ services:
       - "8443:443/tcp"   # SNI proxy bind
     volumes:
       - ../config:/app/config
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       - OTTERGATE_PORT=53
       - OTTERGATE_FALLBACK_DNS=1.1.1.1
@@ -50,6 +51,18 @@ services:
     depends_on:
       ottergate:
         condition: service_healthy
+    command: >
+      sh -c "
+        echo 'sys_enter_execve: [/sbin/init]'
+        while true; do
+          echo 'sys_enter_execve: [/usr/bin/curl https://registry.npmjs.org]'
+          curl -s -m 2 https://registry.npmjs.org > /dev/null || true
+          sleep 4
+          echo 'sys_enter_execve: [/usr/bin/wget http://malicious-domain.example]'
+          wget -q -T 2 http://malicious-domain.example || true
+          sleep 4
+        done
+      "
 
   sandbox_client_2:
     build:
@@ -66,6 +79,18 @@ services:
     depends_on:
       ottergate:
         condition: service_healthy
+    command: >
+      sh -c "
+        echo 'sys_enter_execve: [/sbin/init]'
+        while true; do
+          echo 'sys_enter_execve: [/usr/bin/wget http://github.com]'
+          wget -q -O- http://github.com > /dev/null || true
+          sleep 5
+          echo 'sys_enter_execve: [/usr/bin/curl http://100.100.100.200]'
+          curl -s -m 2 http://100.100.100.200 > /dev/null || true
+          sleep 6
+        done
+      "
 
   mock_backend:
     image: node:26-alpine

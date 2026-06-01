@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -63,18 +62,39 @@ var Streamer = &DockerLogStreamer{
 }
 
 func (s *DockerLogStreamer) Start(ctx context.Context) {
-	time.Sleep(3 * time.Second)
-
-	if _, err := os.Stat(s.socketPath); os.IsNotExist(err) {
-		audit.Logger.System("Container monitoring loop suspended: Docker socket interface is detached for containment safety boundaries.")
-		return
-	}
-
-	audit.Logger.System("Docker socket listener started. Monitoring sandboxed container executions...")
-	s.discoverAndStream(ctx)
-
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
+
+	audit.Logger.System("Initializing Docker socket telemetry connection...")
+
+	// Resilient startup: Ping the containers endpoint directly.
+	for {
+		req, err := http.NewRequestWithContext(ctx, "GET", "http://localhost/containers/json", nil)
+		if err == nil {
+			resp, err := s.httpClient.Do(req)
+			if err == nil {
+				if resp.StatusCode == http.StatusOK {
+					resp.Body.Close()
+					audit.Logger.System("Docker API connection established. Monitoring sandboxed container executions...")
+					s.discoverAndStream(ctx)
+					break
+				} else {
+					audit.Logger.Error(fmt.Sprintf("Docker API responded with HTTP %d during telemetry boot. Retrying...", resp.StatusCode))
+				}
+				resp.Body.Close()
+			} else {
+				audit.Logger.Error(fmt.Sprintf("Failed to dial Docker socket: %s. Retrying...", err.Error()))
+			}
+		} else {
+			audit.Logger.Error(fmt.Sprintf("Failed to construct HTTP request for Docker socket: %s", err.Error()))
+		}
+		
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 
 	for {
 		select {
@@ -82,10 +102,7 @@ func (s *DockerLogStreamer) Start(ctx context.Context) {
 			s.StopAll()
 			return
 		case <-ticker.C:
-			if _, err := os.Stat(s.socketPath); os.IsNotExist(err) {
-				s.StopAll()
-				return
-			}
+			// Continuous discovery of new or restarted containers
 			s.discoverAndStream(ctx)
 		}
 	}
@@ -103,20 +120,17 @@ func (s *DockerLogStreamer) StopAll() {
 func (s *DockerLogStreamer) discoverAndStream(parentCtx context.Context) {
 	req, err := http.NewRequestWithContext(parentCtx, "GET", "http://localhost/containers/json", nil)
 	if err != nil {
-		audit.Logger.Error(fmt.Sprintf("Docker log discover: failed to create request: %s", err.Error()))
 		return
 	}
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		audit.Logger.Error(fmt.Sprintf("Docker log discover: failed to call Unix socket: %s", err.Error()))
 		return
 	}
 	defer resp.Body.Close()
 
 	var containers []DockerContainer
 	if err := json.NewDecoder(resp.Body).Decode(&containers); err != nil {
-		audit.Logger.Error(fmt.Sprintf("Docker log discover: failed to decode containers JSON: %s", err.Error()))
 		return
 	}
 
@@ -132,12 +146,7 @@ func (s *DockerLogStreamer) discoverAndStream(parentCtx context.Context) {
 			name = strings.TrimPrefix(c.Names[0], "/")
 		}
 
-		hostname, _ := os.Hostname()
-		if hostname != "" && strings.HasPrefix(c.ID, hostname) {
-			isOttergate = true
-		}
-
-		if strings.Contains(name, "ottergate-ottergate") {
+		if strings.Contains(name, "app-ottergate") || strings.Contains(name, "ottergate-ottergate") {
 			isOttergate = true
 		}
 
@@ -146,18 +155,23 @@ func (s *DockerLogStreamer) discoverAndStream(parentCtx context.Context) {
 		}
 
 		var ipAddress string
+		hasIp := false
+		
 		IPToName.Lock()
 		for _, netInfo := range c.NetworkSettings.Networks {
 			if netInfo.IPAddress != "" {
 				IPToName.Map[netInfo.IPAddress] = name
 				ipAddress = netInfo.IPAddress
+				hasIp = true
 			}
 		}
-		IPToName.Unlock()
-
-		if ipAddress == "" {
+		
+		// Deterministic Fallback: Force map the name if container hasn't bound an IP yet
+		if !hasIp {
 			ipAddress = name
+			IPToName.Map[ipAddress] = name
 		}
+		IPToName.Unlock()
 
 		runningIds[c.ID] = true
 
@@ -178,21 +192,30 @@ func (s *DockerLogStreamer) discoverAndStream(parentCtx context.Context) {
 }
 
 func (s *DockerLogStreamer) streamContainerLogs(ctx context.Context, id string, name string, ipAddress string) {
+	defer func() {
+		s.mu.Lock()
+		delete(s.activeStreams, id)
+		s.mu.Unlock()
+	}()
+
 	urlPath := fmt.Sprintf("http://localhost/containers/%s/logs?stdout=true&stderr=true&follow=true&tail=5", id)
 	req, err := http.NewRequestWithContext(ctx, "GET", urlPath, nil)
 	if err != nil {
-		audit.Logger.Error(fmt.Sprintf("Docker logs for %s: failed to create request: %s", name, err.Error()))
 		return
 	}
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		audit.Logger.Error(fmt.Sprintf("Docker logs for %s: failed to connect to logs stream: %s", name, err.Error()))
 		return
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return
+	}
+
 	reader := bufio.NewReader(resp.Body)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -203,9 +226,9 @@ func (s *DockerLogStreamer) streamContainerLogs(ctx context.Context, id string, 
 			if err != nil {
 				return
 			}
+
 			size := binaryBigEndianUint32(header[4:8])
 			if size > MaxLogFrameSize {
-				audit.Logger.Error(fmt.Sprintf("Terminated log stream for container %s: frame size exception (%d bytes)", name, size))
 				return
 			}
 
@@ -239,7 +262,6 @@ func (s *DockerLogStreamer) streamContainerLogs(ctx context.Context, id string, 
 }
 
 func binaryBigEndianUint32(b []byte) uint32 {
-	_ = b[3]
 	return uint32(b[3]) | uint32(b[2])<<8 | uint32(b[1])<<16 | uint32(b[0])<<24
 }
 
