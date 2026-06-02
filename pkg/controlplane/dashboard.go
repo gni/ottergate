@@ -512,6 +512,12 @@ const DashboardHTML = `<!DOCTYPE html>
             border-bottom: 1px dashed var(--border-color);
         }
 
+        .terminal-row-output {
+            margin: 0;
+            padding: 2px 0 2px 12px;
+            border: none;
+        }
+
         .term-prompt-char {
             color: var(--primary);
             margin-right: 4px;
@@ -1367,23 +1373,28 @@ const DashboardHTML = `<!DOCTYPE html>
 
                 if (!document.getElementById(cmdId)) {
                     const line = document.createElement('div');
-                    line.className = 'terminal-row';
                     line.id = cmdId;
 
                     const timeStr = new Date(log.timestamp).toLocaleTimeString();
                     const resolvedName = (discoveredClients[log.client_ip] || log.client_ip).toLowerCase();
                     const cleanIp = log.client_ip;
-
-                    line.innerHTML = 
-                        '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">' +
-                            '<span>' +
-                                '<span class="term-prompt-char">#</span>' +
-                                '<span class="term-client-label">' + escapeHtml(resolvedName) + '</span> ' +
-                                '<span class="term-ip-badge">[ ' + escapeHtml(cleanIp) + ' ]</span>' +
-                            '</span>' +
-                            '<span class="term-timestamp-label">' + escapeHtml(timeStr) + '</span>' +
-                        '</div>' +
-                        '<div class="term-command-text" style="padding-left: 12px;">' + escapeHtml(log.details) + '</div>';
+                    
+                    if (log.target === 'output') {
+                        line.className = 'terminal-row-output';
+                        line.innerHTML = '<div class="term-command-text" style="color: var(--text-muted); font-family: var(--font-mono); white-space: pre-wrap;">' + escapeHtml(log.details) + '</div>';
+                    } else {
+                        line.className = 'terminal-row';
+                        line.innerHTML = 
+                            '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; margin-top: 8px;">' +
+                                '<span>' +
+                                    '<span class="term-prompt-char">#</span>' +
+                                    '<span class="term-client-label">' + escapeHtml(resolvedName) + '</span> ' +
+                                    '<span class="term-ip-badge">[ ' + escapeHtml(cleanIp) + ' ]</span>' +
+                                '</span>' +
+                                '<span class="term-timestamp-label">' + escapeHtml(timeStr) + '</span>' +
+                            '</div>' +
+                            '<div class="term-command-text" style="padding-left: 12px; color: var(--text-main);">' + escapeHtml(log.details) + '</div>';
+                    }
                     
                     term.insertBefore(line, term.firstChild);
                 }
