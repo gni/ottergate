@@ -228,7 +228,7 @@ func (s *DockerLogStreamer) streamGvisorLogs(ctx context.Context, id string, nam
 							   strings.Contains(line, "sys_socket") || 
 							   strings.Contains(line, "sys_clone") || 
 							   strings.Contains(line, "sys_ptrace") {
-								audit.Logger.AddCommandEvent(ipAddress, "[gvisor-trace] " + cleanLogLine(line))
+								audit.Logger.Command(ipAddress, "[gvisor-trace] " + cleanLogLine(line))
 							}
 						}
 						tails[file] = info.Size()
@@ -283,6 +283,18 @@ func (s *DockerLogStreamer) streamContainerLogs(ctx context.Context, id string, 
 		return
 	}
 
+	processLine := func(line string) {
+		line = cleanLogLine(line)
+		if line == "" {
+			return
+		}
+		if strings.Contains(line, "execve") || strings.Contains(line, "sys_enter_execve") {
+			audit.Logger.Command(ipAddress, line)
+		} else {
+			audit.Logger.ContainerOutput(ipAddress, line)
+		}
+	}
+
 	if isTty {
 		scanner := bufio.NewScanner(resp.Body)
 		for scanner.Scan() {
@@ -290,30 +302,14 @@ func (s *DockerLogStreamer) streamContainerLogs(ctx context.Context, id string, 
 			case <-ctx.Done():
 				return
 			default:
-				line := scanner.Text()
-				line = strings.TrimSpace(line)
-				if line == "" {
-					continue
-				}
-				line = cleanLogLine(line)
-				if strings.Contains(line, "execve") || strings.Contains(line, "sys_enter_execve") {
-					audit.Logger.AddCommandEvent(ipAddress, line)
-				} else {
-					audit.GlobalBuffer.Add(audit.LogEvent{
-						Timestamp: time.Now(),
-						Type:      "command",
-						ClientIP:  ipAddress,
-						Details:   line,
-						Status:    "info",
-						Target:    "output",
-					})
-				}
+				processLine(scanner.Text())
 			}
 		}
 		return
 	}
 
 	reader := bufio.NewReader(resp.Body)
+	var lineBuf strings.Builder
 
 	for {
 		select {
@@ -337,24 +333,17 @@ func (s *DockerLogStreamer) streamContainerLogs(ctx context.Context, id string, 
 				return
 			}
 
-			line := strings.TrimSpace(string(payload))
-			if line == "" {
-				continue
-			}
-
-			line = cleanLogLine(line)
-
-			if strings.Contains(line, "execve") || strings.Contains(line, "sys_enter_execve") {
-				audit.Logger.AddCommandEvent(ipAddress, line)
-			} else {
-				audit.GlobalBuffer.Add(audit.LogEvent{
-					Timestamp: time.Now(),
-					Type:      "command",
-					ClientIP:  ipAddress,
-					Details:   line,
-					Status:    "info",
-					Target:    "output",
-				})
+			chunk := string(payload)
+			for {
+				idx := strings.IndexByte(chunk, '\n')
+				if idx == -1 {
+					lineBuf.WriteString(chunk)
+					break
+				}
+				lineBuf.WriteString(chunk[:idx])
+				processLine(lineBuf.String())
+				lineBuf.Reset()
+				chunk = chunk[idx+1:]
 			}
 		}
 	}
@@ -364,16 +353,24 @@ func binaryBigEndianUint32(b []byte) uint32 {
 	return uint32(b[3]) | uint32(b[2])<<8 | uint32(b[1])<<16 | uint32(b[0])<<24
 }
 
-var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
+var (
+	csiRegex = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
+	oscRegex = regexp.MustCompile(`\x1b\][^\x07\x1b\\]*(?:\x07|\x1b\\)`)
+)
 
 func cleanLogLine(line string) string {
-	line = ansiRegex.ReplaceAllString(line, "")
+	line = oscRegex.ReplaceAllString(line, "")
+	line = csiRegex.ReplaceAllString(line, "")
+
+	if idx := strings.LastIndexByte(line, '\r'); idx != -1 {
+		line = line[idx+1:]
+	}
 
 	var sb strings.Builder
 	for _, r := range line {
 		if r >= 32 && r <= 126 {
 			sb.WriteRune(r)
-		} else if r == '\t' || r == '\n' || r == '\r' {
+		} else if r == '\t' || r == '\n' {
 			sb.WriteRune(' ')
 		}
 	}

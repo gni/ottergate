@@ -94,7 +94,7 @@
         "enabled": true,
         "upstream": "http://127.0.0.1:3000",
         "headers": {
-          "X-Environment": "v1:5b5740d1d419968225b950ed:8f0456518fd8690ad6e562bdc847d9ac:25a20f2c8e3981089d58955fdfa39f7f38"
+          "X-Environment": "Test-Mesh-PROD"
         },
         "forwardRequestBody": false,
         "maxRequestBodyBytes": 1048576,
@@ -125,7 +125,7 @@
         "enabled": true,
         "upstream": "https://172.21.0.100:1234",
         "headers": {
-          "X-Environment": "v1:20596aa66142a030cd425001:14f5b9febf6ff71531bda2257a19207b:3270394a8fc7535b6de70791c3b33a4be1d50ed882"
+          "X-Environment": "Test-Mesh-PROD"
         },
         "forwardRequestBody": false,
         "maxRequestBodyBytes": 1048576,

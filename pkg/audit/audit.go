@@ -167,7 +167,6 @@ func (l *AuditLogger) DNS(ip string, questions []struct {
 				status = fmt.Sprintf("%d", rcode)
 			}
 
-			// Colored parts for terminal output
 			cLogType := logType
 			if logType == "localdns" {
 				cLogType = "\033[1;36mlocaldns\033[0m" // Bold Cyan
@@ -184,7 +183,6 @@ func (l *AuditLogger) DNS(ip string, questions []struct {
 			fmt.Fprintf(output, "[%s] [%s] %s requested %s%s record for %s -> %s%s\n",
 				clock, cLogType, sanitizedIp, prefix, strings.ToUpper(q.Type), l.Sanitize(q.Name), cStatus, resolvedSuffix)
 
-			// Append to real-time event buffer
 			evStatus := "allow"
 			if rcode == 5 || rcode == 3 {
 				evStatus = "deny"
@@ -254,7 +252,6 @@ func (l *AuditLogger) Firewall(ip string, target string, action string, detail s
 		fmt.Fprintf(output, "[%s] [%s] connection from %s targeting %s was %s%s\n",
 			l.getHumanTime(), cComp, l.Sanitize(ip), l.Sanitize(target), cStatus, extra)
 
-		// Append to real-time event buffer
 		evStatus := "allow"
 		if action == "DENY" {
 			evStatus = "deny"
@@ -335,7 +332,6 @@ func (l *AuditLogger) HTTP(ip string, method string, host string, path string, s
 		fmt.Fprintf(output, "[%s] [%s] %s | %s %s%s status %s | %s\n",
 			l.getHumanTime(), cComp, l.Sanitize(ip), l.Sanitize(method), l.Sanitize(host), l.Sanitize(path), cStatus, routeInfo)
 
-		// Append to real-time event buffer
 		evStatus := "allow"
 		if status >= 400 {
 			evStatus = "deny"
@@ -429,6 +425,82 @@ func (l *AuditLogger) Error(msg string) {
 			Details:   l.Sanitize(msg),
 			Status:    "error",
 			Target:    "error",
+		})
+	}
+}
+
+type commandLogPayload struct {
+	Timestamp string `json:"timestamp"`
+	Level     string `json:"level"`
+	Component string `json:"component"`
+	IP        string `json:"ip"`
+	Command   string `json:"command"`
+}
+
+func (l *AuditLogger) Command(ip string, command string) {
+	atomic.AddUint64(&l.systemEvents, 1)
+	if l.isTestEnv { return }
+
+	l.mu.RLock()
+	useJson := l.useJson
+	output := l.output
+	l.mu.RUnlock()
+
+	if useJson {
+		payload := commandLogPayload{
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Level:     "INFO",
+			Component: "EXEC",
+			IP:        ip,
+			Command:   command,
+		}
+		data, _ := json.Marshal(payload)
+		fmt.Fprintln(output, string(data))
+	} else {
+		cComp := "\033[34mexecve\033[0m" // Blue
+		fmt.Fprintf(output, "[%s] [%s] %s executed: %s\n", l.getHumanTime(), cComp, l.Sanitize(ip), l.Sanitize(command))
+		
+		GlobalBuffer.Add(LogEvent{
+			Timestamp: time.Now(),
+			Type:      "command",
+			ClientIP:  l.Sanitize(ip),
+			Details:   l.Sanitize(command),
+			Status:    "info",
+			Target:    "execve",
+		})
+	}
+}
+
+func (l *AuditLogger) ContainerOutput(ip string, log string) {
+	atomic.AddUint64(&l.systemEvents, 1)
+	if l.isTestEnv { return }
+
+	l.mu.RLock()
+	useJson := l.useJson
+	output := l.output
+	l.mu.RUnlock()
+
+	if useJson {
+		payload := commandLogPayload{
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Level:     "INFO",
+			Component: "STDOUT",
+			IP:        ip,
+			Command:   log,
+		}
+		data, _ := json.Marshal(payload)
+		fmt.Fprintln(output, string(data))
+	} else {
+		cComp := "\033[36mstdout\033[0m" // Cyan
+		fmt.Fprintf(output, "[%s] [%s] %s | %s\n", l.getHumanTime(), cComp, l.Sanitize(ip), l.Sanitize(log))
+		
+		GlobalBuffer.Add(LogEvent{
+			Timestamp: time.Now(),
+			Type:      "command",
+			ClientIP:  l.Sanitize(ip),
+			Details:   l.Sanitize(log),
+			Status:    "info",
+			Target:    "output",
 		})
 	}
 }

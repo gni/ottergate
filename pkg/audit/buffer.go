@@ -48,14 +48,3 @@ func (b *LogBuffer) GetEvents() []LogEvent {
 	}
 	return res
 }
-
-func (l *AuditLogger) AddCommandEvent(clientIP string, command string) {
-	GlobalBuffer.Add(LogEvent{
-		Timestamp: time.Now(),
-		Type:      "command",
-		ClientIP:  clientIP,
-		Details:   command,
-		Status:    "info",
-		Target:    "execve",
-	})
-}
