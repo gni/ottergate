@@ -47,12 +47,45 @@ var (
 	}
 )
 
+type VirtualListener struct {
+	mu     sync.Mutex
+	conns  chan net.Conn
+	closed bool
+}
+
+func NewVirtualListener() *VirtualListener {
+	return &VirtualListener{conns: make(chan net.Conn, 1024)}
+}
+
+func (v *VirtualListener) Accept() (net.Conn, error) {
+	c, ok := <-v.conns
+	if !ok {
+		return nil, net.ErrClosed
+	}
+	return c, nil
+}
+
+func (v *VirtualListener) Close() error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if !v.closed {
+		v.closed = true
+		close(v.conns)
+	}
+	return nil
+}
+
+func (v *VirtualListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443}
+}
+
 type HttpHandler struct {
 	mu              sync.RWMutex
 	cfg             *config.ServerConfig
 	port            int
 	idleTimeout     time.Duration
 	server          *http.Server
+	VirtualListener *VirtualListener
 	circuitBreakers map[string]*ProxyCircuitBreaker
 	activeConns     map[net.Conn]bool
 	loopSecret      string
@@ -77,6 +110,7 @@ func NewHttpHandler(cfg *config.ServerConfig) *HttpHandler {
 		cfg:             cfg,
 		port:            port,
 		idleTimeout:     idle,
+		VirtualListener: NewVirtualListener(),
 		circuitBreakers: make(map[string]*ProxyCircuitBreaker),
 		activeConns:     make(map[net.Conn]bool),
 		loopSecret:      hex.EncodeToString(secretBytes),
@@ -121,6 +155,19 @@ func (h *HttpHandler) Start() error {
 		}
 	}()
 
+	virtServer := &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       h.idleTimeout,
+		ConnState:         h.server.ConnState,
+	}
+
+	go func() {
+		if err := virtServer.Serve(h.VirtualListener); err != nil && err != http.ErrServerClosed {
+			audit.Logger.Error(fmt.Sprintf("Virtual HTTPS server execution fault: %s", err.Error()))
+		}
+	}()
+
 	return nil
 }
 
@@ -132,6 +179,8 @@ func (h *HttpHandler) Stop() error {
 	if h.server != nil {
 		_ = h.server.Close()
 	}
+	_ = h.VirtualListener.Close()
+	
 	for conn := range h.activeConns {
 		_ = conn.Close()
 	}

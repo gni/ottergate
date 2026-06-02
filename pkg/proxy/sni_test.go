@@ -14,7 +14,8 @@ func TestNewSniProxyServiceAndUpdates(t *testing.T) {
 		TcpIdleTimeoutMs: 10000,
 	}
 
-	service := NewSniProxyService(cfg)
+	httpHandler := NewHttpHandler(cfg)
+	service := NewSniProxyService(cfg, httpHandler)
 
 	if service.port != 443 { // default HttpsPort if nil
 		t.Errorf("expected default HttpsPort 443, got %d", service.port)

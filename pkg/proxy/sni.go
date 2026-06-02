@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -19,6 +20,20 @@ const (
 	MaxTlsExtensions   = 50
 )
 
+type PrefixConn struct {
+	net.Conn
+	Prefix []byte
+}
+
+func (p *PrefixConn) Read(b []byte) (int, error) {
+	if len(p.Prefix) > 0 {
+		n := copy(b, p.Prefix)
+		p.Prefix = p.Prefix[n:]
+		return n, nil
+	}
+	return p.Conn.Read(b)
+}
+
 type SniProxyService struct {
 	mu                sync.Mutex
 	cfg               *config.ServerConfig
@@ -27,9 +42,10 @@ type SniProxyService struct {
 	tcpListener       net.Listener
 	activeConnections map[net.Conn]bool
 	stopChan          chan struct{}
+	httpHandler       *HttpHandler
 }
 
-func NewSniProxyService(cfg *config.ServerConfig) *SniProxyService {
+func NewSniProxyService(cfg *config.ServerConfig, httpHandler *HttpHandler) *SniProxyService {
 	idle := 30 * time.Second
 	if cfg.TcpIdleTimeoutMs > 0 {
 		idle = time.Duration(cfg.TcpIdleTimeoutMs) * time.Millisecond
@@ -46,6 +62,7 @@ func NewSniProxyService(cfg *config.ServerConfig) *SniProxyService {
 		idleTimeout:       idle,
 		activeConnections: make(map[net.Conn]bool),
 		stopChan:          make(chan struct{}),
+		httpHandler:       httpHandler,
 	}
 }
 
@@ -238,8 +255,11 @@ func (s *SniProxyService) resolveHost(hostname string, cfg *config.ServerConfig)
 }
 
 func (s *SniProxyService) handleConnection(clientSocket net.Conn) {
+	isHandledOff := false
 	defer func() {
-		clientSocket.Close()
+		if !isHandledOff {
+			clientSocket.Close()
+		}
 		s.mu.Lock()
 		delete(s.activeConnections, clientSocket)
 		s.mu.Unlock()
@@ -257,7 +277,9 @@ func (s *SniProxyService) handleConnection(clientSocket net.Conn) {
 		s.mu.Unlock()
 		if !handled {
 			audit.Logger.HTTP(clientIp, "TLS", "UNKNOWN", fmt.Sprintf(":%d", s.port), 408, "Dropped: ClientHello absolute timeout (Slowloris)")
-			_ = clientSocket.Close()
+			if !isHandledOff {
+				_ = clientSocket.Close()
+			}
 		}
 	})
 	defer absoluteHandshakeTimeout.Stop()
@@ -310,6 +332,27 @@ func (s *SniProxyService) handleConnection(clientSocket net.Conn) {
 		portConfig := hostConfig
 		if !hasHost {
 			portConfig = currCfg.Hosts["*"]
+		}
+
+		if portConfig.HttpProxy != nil && portConfig.HttpProxy.Enabled {
+			if currCfg.Tls == nil {
+				return errors.New("L7 HTTPS termination requires a global TLS certificate configured")
+			}
+			tlsCfg, err := loadTlsConfig(currCfg.Tls)
+			if err != nil {
+				return fmt.Errorf("TLS load fault: %w", err)
+			}
+
+			prefixConn := &PrefixConn{
+				Conn:   clientSocket,
+				Prefix: clientHelloBytes,
+			}
+			tlsConn := tls.Server(prefixConn, tlsCfg)
+
+			s.httpHandler.VirtualListener.conns <- tlsConn
+			isHandledOff = true
+			audit.Logger.HTTP(clientIp, "TLS-TERM", sni, fmt.Sprintf(":%d", s.port), 200, "L7 Decrypted -> Virtual HTTP Router")
+			return nil
 		}
 
 		var targetIps []string
@@ -391,6 +434,8 @@ func (s *SniProxyService) handleConnection(clientSocket net.Conn) {
 	}
 
 	if err := tryTunnel(); err != nil {
-		audit.Logger.HTTP(clientIp, "TLS-SNI", sni, fmt.Sprintf(":%d", s.port), 403, fmt.Sprintf("Blocked: %s", err.Error()))
+		if !isHandledOff {
+			audit.Logger.HTTP(clientIp, "TLS-SNI", sni, fmt.Sprintf(":%d", s.port), 403, fmt.Sprintf("Blocked: %s", err.Error()))
+		}
 	}
 }

@@ -64,7 +64,7 @@ func (zd *OttergateDaemon) Start(cfg *config.ServerConfig) error {
 	if cfg.HttpsPort != nil {
 		httpsPort = *cfg.HttpsPort
 	}
-	sniProxy := proxy.NewSniProxyService(cfg)
+	sniProxy := proxy.NewSniProxyService(cfg, httpHandler)
 	if err := sniProxy.Start(); err != nil {
 		_ = dnsHandler.Stop()
 		_ = httpHandler.Stop()
