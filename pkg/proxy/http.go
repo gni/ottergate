@@ -634,6 +634,9 @@ func (h *HttpHandler) doHttpProxy(
 		client := &http.Client{
 			Transport: transport,
 			Timeout:   15 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		}
 
 		upReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetUrl.String(), bodyReader)

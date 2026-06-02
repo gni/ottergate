@@ -147,7 +147,9 @@ func (s *DockerLogStreamer) discoverAndStream(parentCtx context.Context) {
 			name = strings.TrimPrefix(c.Names[0], "/")
 		}
 
-		if strings.Contains(name, "app-ottergate") || strings.Contains(name, "ottergate-ottergate") {
+		myHostname, _ := os.Hostname()
+		if (myHostname != "" && strings.HasPrefix(c.ID, myHostname)) || 
+		   (strings.Contains(name, "ottergate") && !strings.Contains(name, "client") && !strings.Contains(name, "backend")) {
 			isOttergate = true
 		}
 
@@ -337,7 +339,11 @@ func (s *DockerLogStreamer) streamContainerLogs(ctx context.Context, id string, 
 			for {
 				idx := strings.IndexByte(chunk, '\n')
 				if idx == -1 {
-					lineBuf.WriteString(chunk)
+					if lineBuf.Len()+len(chunk) > 5242880 {
+						lineBuf.Reset()
+					} else {
+						lineBuf.WriteString(chunk)
+					}
 					break
 				}
 				lineBuf.WriteString(chunk[:idx])
