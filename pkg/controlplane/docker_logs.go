@@ -68,43 +68,113 @@ func (s *DockerLogStreamer) Start(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	audit.Logger.System("Initializing Docker socket telemetry connection...")
+	// Check if Docker socket exists/is active
+	useDocker := true
+	if _, err := os.Stat("/var/run/docker.sock"); os.IsNotExist(err) {
+		useDocker = false
+		audit.Logger.System("Docker socket not found at /var/run/docker.sock. Falling back to direct gVisor directory telemetry...")
+	}
 
-	for {
-		req, err := http.NewRequestWithContext(ctx, "GET", "http://localhost/containers/json", nil)
-		if err == nil {
-			resp, err := s.httpClient.Do(req)
+	if useDocker {
+		audit.Logger.System("Initializing Docker socket telemetry connection...")
+
+		for {
+			req, err := http.NewRequestWithContext(ctx, "GET", "http://localhost/containers/json", nil)
 			if err == nil {
-				if resp.StatusCode == http.StatusOK {
+				resp, err := s.httpClient.Do(req)
+				if err == nil {
+					if resp.StatusCode == http.StatusOK {
+						resp.Body.Close()
+						audit.Logger.System("Docker API connection established. Monitoring sandboxed container executions...")
+						s.discoverAndStream(ctx)
+						break
+					} else {
+						audit.Logger.Error(fmt.Sprintf("Docker API responded with HTTP %d during telemetry boot. Retrying...", resp.StatusCode))
+					}
 					resp.Body.Close()
-					audit.Logger.System("Docker API connection established. Monitoring sandboxed container executions...")
-					s.discoverAndStream(ctx)
-					break
 				} else {
-					audit.Logger.Error(fmt.Sprintf("Docker API responded with HTTP %d during telemetry boot. Retrying...", resp.StatusCode))
+					audit.Logger.Error(fmt.Sprintf("Failed to dial Docker socket: %s. Retrying...", err.Error()))
 				}
-				resp.Body.Close()
 			} else {
-				audit.Logger.Error(fmt.Sprintf("Failed to dial Docker socket: %s. Retrying...", err.Error()))
+				audit.Logger.Error(fmt.Sprintf("Failed to construct HTTP request for Docker socket: %s", err.Error()))
 			}
-		} else {
-			audit.Logger.Error(fmt.Sprintf("Failed to construct HTTP request for Docker socket: %s", err.Error()))
+			
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
 		}
-		
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
+
+		for {
+			select {
+			case <-ctx.Done():
+				s.StopAll()
+				return
+			case <-ticker.C:
+				s.discoverAndStream(ctx)
+			}
+		}
+	} else {
+		// Non-Docker mode: directly scan gVisor trace log directories
+		s.discoverAndStreamDirect(ctx)
+		for {
+			select {
+			case <-ctx.Done():
+				s.StopAll()
+				return
+			case <-ticker.C:
+				s.discoverAndStreamDirect(ctx)
+			}
+		}
+	}
+}
+
+func (s *DockerLogStreamer) discoverAndStreamDirect(parentCtx context.Context) {
+	dir := "/var/log/gvisor"
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	runningIds := make(map[string]bool)
+
+	for _, f := range files {
+		if !f.IsDir() {
+			continue
+		}
+		id := f.Name()
+		if len(id) < 8 {
+			continue
+		}
+
+		name := id
+		if len(name) > 12 {
+			name = name[:12]
+		}
+		ipAddress := name
+
+		IPToName.Lock()
+		IPToName.Map[ipAddress] = name
+		IPToName.Unlock()
+
+		runningIds[id] = true
+
+		if _, active := s.activeStreams[id]; !active {
+			ctx, cancel := context.WithCancel(parentCtx)
+			s.activeStreams[id] = cancel
+			audit.Logger.System(fmt.Sprintf("Discovered direct gVisor sandbox %s. Starting log stream listener...", name))
+			go s.streamGvisorLogs(ctx, id, name, ipAddress)
 		}
 	}
 
-	for {
-		select {
-		case <-ctx.Done():
-			s.StopAll()
-			return
-		case <-ticker.C:
-			s.discoverAndStream(ctx)
+	for id, cancel := range s.activeStreams {
+		if !runningIds[id] {
+			cancel()
+			delete(s.activeStreams, id)
 		}
 	}
 }
