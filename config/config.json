@@ -41,7 +41,8 @@
       "github.com",
       "*.githubusercontent.com",
       "secure-api.loop",
-      "ottergate.loop"
+      "ottergate.loop",
+      "pi.dev"
     ],
     "blocklist_domains": [
       "*.malicious-domain.example",
