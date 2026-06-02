@@ -1287,7 +1287,6 @@ const DashboardHTML = `<!DOCTYPE html>
                 const log = filtered[i];
                 const cleanTarget = (log.target || '').replace(/[^a-zA-Z0-9]/g, '');
                 
-                // Deterministic ID generation using hash collision resistance instead of array loops
                 const logId = 'log_' + log.timestamp.replace(/[^a-zA-Z0-9]/g, '') + '_' + hashCode(log.details || '');
                 activeIds.add(logId);
 
@@ -1359,12 +1358,12 @@ const DashboardHTML = `<!DOCTYPE html>
             const placeholder = term.querySelector('.no-data-placeholder');
             if (placeholder) placeholder.remove();
 
-            const chronological = [...cmdLogs].reverse();
-            let addedNew = false;
+            const activeIds = new Set();
 
-            chronological.forEach((log) => {
-                // Deterministic ID generation using hash collision resistance
+            for (let i = cmdLogs.length - 1; i >= 0; i--) {
+                const log = cmdLogs[i];
                 const cmdId = 'cmd_' + log.timestamp.replace(/[^a-zA-Z0-9]/g, '') + '_' + hashCode(log.details || '');
+                activeIds.add(cmdId);
 
                 if (!document.getElementById(cmdId)) {
                     const line = document.createElement('div');
@@ -1385,18 +1384,16 @@ const DashboardHTML = `<!DOCTYPE html>
                             '<span class="term-timestamp-label">' + escapeHtml(timeStr) + '</span>' +
                         '</div>' +
                         '<div class="term-command-text" style="padding-left: 12px;">' + escapeHtml(log.details) + '</div>';
-                    term.appendChild(line);
-                    addedNew = true;
+                    
+                    term.insertBefore(line, term.firstChild);
+                }
+            }
+
+            Array.from(term.children).forEach(child => {
+                if (child.id && !activeIds.has(child.id)) {
+                    child.remove();
                 }
             });
-
-            while (term.children.length > 100) {
-                term.removeChild(term.firstChild);
-            }
-
-            if (addedNew) {
-                term.scrollTop = term.scrollHeight;
-            }
         }
 
         function toggleTheme() {
