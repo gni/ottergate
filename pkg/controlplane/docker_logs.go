@@ -266,48 +266,75 @@ func (s *DockerLogStreamer) discoverAndStream(parentCtx context.Context) {
 
 func (s *DockerLogStreamer) streamGvisorLogs(ctx context.Context, id string, name string, ipAddress string) {
 	dir := filepath.Join("/var/log/gvisor", id)
-	tails := make(map[string]int64)
-	ticker := time.NewTicker(2 * time.Second)
+	tailedFiles := make(map[string]bool)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
+	startTailing := func(filePath string) {
+		tailedFiles[filePath] = true
+		go func() {
+			f, err := os.Open(filePath)
+			if err != nil {
+				return
+			}
+			defer f.Close()
+
+			reader := bufio.NewReader(f)
+			var partialLine strings.Builder
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					line, err := reader.ReadString('\n')
+					if err != nil {
+						if err == io.EOF {
+							if len(line) > 0 {
+								partialLine.WriteString(line)
+							}
+							time.Sleep(100 * time.Millisecond)
+							continue
+						}
+						return
+					}
+
+					var fullLine string
+					if partialLine.Len() > 0 {
+						partialLine.WriteString(line)
+						fullLine = partialLine.String()
+						partialLine.Reset()
+					} else {
+						fullLine = line
+					}
+
+					fullLine = strings.TrimSpace(fullLine)
+					if fullLine == "" {
+						continue
+					}
+
+					if straceRegex.MatchString(fullLine) {
+						audit.Logger.Command(ipAddress, formatStraceLine(fullLine))
+					}
+				}
+			}
+		}()
+	}
+
 	for {
+		files, err := filepath.Glob(filepath.Join(dir, "runsc.log.*"))
+		if err == nil {
+			for _, file := range files {
+				if !tailedFiles[file] {
+					startTailing(file)
+				}
+			}
+		}
+
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			files, err := filepath.Glob(filepath.Join(dir, "runsc.log.*"))
-			if err != nil || len(files) == 0 {
-				continue
-			}
-			for _, file := range files {
-				info, err := os.Stat(file)
-				if err != nil {
-					continue
-				}
-				lastPos := tails[file]
-				if info.Size() > lastPos {
-					f, err := os.Open(file)
-					if err == nil {
-						_, _ = f.Seek(lastPos, io.SeekStart)
-						scanner := bufio.NewScanner(f)
-						for scanner.Scan() {
-							line := strings.TrimSpace(scanner.Text())
-							if line == "" {
-								continue
-							}
-							if strings.Contains(line, "sys_execve") || 
-							   strings.Contains(line, "sys_connect") || 
-							   strings.Contains(line, "sys_socket") || 
-							   strings.Contains(line, "sys_clone") || 
-							   strings.Contains(line, "sys_ptrace") {
-								audit.Logger.Command(ipAddress, "[gvisor-trace] " + cleanLogLine(line))
-							}
-						}
-						tails[file] = info.Size()
-						_ = f.Close()
-					}
-				}
-			}
 		}
 	}
 }
@@ -430,9 +457,51 @@ func binaryBigEndianUint32(b []byte) uint32 {
 }
 
 var (
-	csiRegex = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
-	oscRegex = regexp.MustCompile(`\x1b\][^\x07\x1b\\]*(?:\x07|\x1b\\)`)
+	csiRegex     = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
+	oscRegex     = regexp.MustCompile(`\x1b\][^\x07\x1b\\]*(?:\x07|\x1b\\)`)
+	straceRegex  = regexp.MustCompile(`\[\s*\d+:\s*\d+\]\s+[^\s]+\s+E\s+(execve|connect|socket|clone|ptrace)\(`)
+	execveRegex  = regexp.MustCompile(`([^\s]+)\s+E\s+execve\([^,\s]+\s+([^,\s]+),\s+[^,\s]+\s+(\[[^\]]*\])`)
+	connectRegex = regexp.MustCompile(`([^\s]+)\s+E\s+connect\([^,]+,\s+[^,\s]+\s+\{Family:\s*([^,\s}]+),\s*Addr:\s*([^,\s}]+),\s*Port:\s*([^,\s}]+)\}`)
+	socketRegex  = regexp.MustCompile(`([^\s]+)\s+E\s+socket\(([^,\s]+),\s*([^,\s]+),\s*([^)\s]+)\)`)
 )
+
+func formatStraceLine(line string) string {
+	cleaned := cleanLogLine(line)
+
+	if m := execveRegex.FindStringSubmatch(cleaned); len(m) == 4 {
+		procName := m[1]
+		cmdPath := m[2]
+		cmdArgs := m[3]
+		return fmt.Sprintf("%s %s %s", procName, cmdPath, cmdArgs)
+	}
+
+	if m := connectRegex.FindStringSubmatch(cleaned); len(m) == 5 {
+		procName := m[1]
+		family := m[2]
+		addr := m[3]
+		port := m[4]
+		if family == "AF_INET6" {
+			return fmt.Sprintf("%s connected to [%s]:%s", procName, addr, port)
+		}
+		return fmt.Sprintf("%s connected to %s:%s", procName, addr, port)
+	}
+
+	if m := socketRegex.FindStringSubmatch(cleaned); len(m) == 5 {
+		procName := m[1]
+		domain := m[2]
+		sockType := strings.Split(m[3], "|")[0]
+		protocol := m[4]
+		return fmt.Sprintf("%s created socket: %s %s %s", procName, domain, sockType, protocol)
+	}
+
+	if idx := strings.Index(cleaned, "strace.go:"); idx != -1 {
+		sub := cleaned[idx:]
+		if endIdx := strings.Index(sub, "] "); endIdx != -1 {
+			return sub[endIdx+2:]
+		}
+	}
+	return cleaned
+}
 
 func cleanLogLine(line string) string {
 	line = oscRegex.ReplaceAllString(line, "")
