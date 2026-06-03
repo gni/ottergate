@@ -397,7 +397,9 @@ func (s *DockerLogStreamer) streamContainerLogs(ctx context.Context, id string, 
 		if strings.Contains(line, "execve") || strings.Contains(line, "sys_enter_execve") {
 			audit.Logger.Command(ipAddress, line)
 		} else {
-			audit.Logger.ContainerOutput(ipAddress, line)
+			if os.Getenv("OTTERGATE_LOG_CONTAINER_STDOUT") != "false" {
+				audit.Logger.ContainerOutput(ipAddress, line)
+			}
 		}
 	}
 
