@@ -166,8 +166,10 @@ func (s *DockerLogStreamer) discoverAndStreamDirect(parentCtx context.Context) {
 		if _, active := s.activeStreams[id]; !active {
 			ctx, cancel := context.WithCancel(parentCtx)
 			s.activeStreams[id] = cancel
-			audit.Logger.System(fmt.Sprintf("Discovered direct gVisor sandbox %s. Starting log stream listener...", name))
-			go s.streamGvisorLogs(ctx, id, name, ipAddress)
+			if os.Getenv("OTTERGATE_STREAM_GVISOR_LOGS") != "false" {
+				audit.Logger.System(fmt.Sprintf("Discovered direct gVisor sandbox %s. Starting gVisor strace stream...", name))
+				go s.streamGvisorLogs(ctx, id, name, ipAddress)
+			}
 		}
 	}
 
@@ -250,9 +252,14 @@ func (s *DockerLogStreamer) discoverAndStream(parentCtx context.Context) {
 		if _, active := s.activeStreams[c.ID]; !active {
 			ctx, cancel := context.WithCancel(parentCtx)
 			s.activeStreams[c.ID] = cancel
-			audit.Logger.System(fmt.Sprintf("Discovered container %s (%s) IP %s. Starting log stream listener...", name, c.ID[:12], ipAddress))
-			go s.streamContainerLogs(ctx, c.ID, name, ipAddress)
-			go s.streamGvisorLogs(ctx, c.ID, name, ipAddress)
+			if os.Getenv("OTTERGATE_STREAM_CONTAINER_LOGS") != "false" {
+				audit.Logger.System(fmt.Sprintf("Discovered container %s (%s) IP %s. Starting stdout stream...", name, c.ID[:12], ipAddress))
+				go s.streamContainerLogs(ctx, c.ID, name, ipAddress)
+			}
+			if os.Getenv("OTTERGATE_STREAM_GVISOR_LOGS") != "false" {
+				audit.Logger.System(fmt.Sprintf("Discovered container %s (%s) IP %s. Starting gVisor strace stream...", name, c.ID[:12], ipAddress))
+				go s.streamGvisorLogs(ctx, c.ID, name, ipAddress)
+			}
 		}
 	}
 
