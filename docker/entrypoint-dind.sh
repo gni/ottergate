@@ -28,6 +28,16 @@ echo "[dind-entrypoint] Docker daemon is up and running!"
 
 echo "[dind-entrypoint] Verifying available Docker runtimes:"
 docker info | grep -E "Runtimes|runsc|crun" || true
+# Ensure resolv.conf exists and is a valid file pointing to Ottergate DNS
+if [ -d /app/config/resolv.conf ]; then
+    echo "[dind-entrypoint] Cleaning up incorrect directory at /app/config/resolv.conf..."
+    rm -rf /app/config/resolv.conf
+fi
+
+if [ ! -f /app/config/resolv.conf ]; then
+    echo "[dind-entrypoint] Creating resolv.conf pointing to Ottergate DNS..."
+    echo "nameserver 172.20.0.53" > /app/config/resolv.conf
+fi
 
 if [ ! -f /app/config/ca.crt ]; then
     echo "[dind-entrypoint] Generating test TLS certificates..."

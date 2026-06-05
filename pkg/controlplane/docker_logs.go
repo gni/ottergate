@@ -44,6 +44,14 @@ var IPToName = &ContainerIpMap{
 	Map: make(map[string]string),
 }
 
+func init() {
+	audit.ResolveIP = func(ip string) string {
+		IPToName.RLock()
+		defer IPToName.RUnlock()
+		return IPToName.Map[ip]
+	}
+}
+
 type DockerLogStreamer struct {
 	mu            sync.Mutex
 	activeStreams map[string]context.CancelFunc

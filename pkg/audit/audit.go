@@ -33,6 +33,25 @@ var Logger = &AuditLogger{
 	isTestEnv: strings.HasSuffix(os.Args[0], ".test") || os.Getenv("GO_ENV") == "test",
 }
 
+var ResolveIP func(string) string
+
+func (l *AuditLogger) formatIP(ip string) string {
+	if ResolveIP != nil {
+		name := ResolveIP(ip)
+		if name != "" && name != ip {
+			return fmt.Sprintf("%s (%s)", ip, name)
+		}
+	}
+	return ip
+}
+
+func (l *AuditLogger) resolveContainer(ip string) string {
+	if ResolveIP != nil {
+		return ResolveIP(ip)
+	}
+	return ""
+}
+
 func (l *AuditLogger) SetJsonMode(enable bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -97,6 +116,7 @@ type dnsLogPayload struct {
 	Level       string           `json:"level"`
 	Component   string           `json:"component"`
 	IP          string           `json:"ip"`
+	Container   string           `json:"container,omitempty"`
 	Questions   []dnsQuestionLog `json:"questions"`
 	Rcode       int              `json:"rcode"`
 	Cached      bool             `json:"cached"`
@@ -136,6 +156,7 @@ func (l *AuditLogger) DNS(ip string, questions []struct {
 			Level:       "INFO",
 			Component:   strings.ToUpper(logType),
 			IP:          ip,
+			Container:   l.resolveContainer(ip),
 			Questions:   logs,
 			Rcode:       rcode,
 			Cached:      cached,
@@ -157,6 +178,7 @@ func (l *AuditLogger) DNS(ip string, questions []struct {
 		}
 		clock := l.getHumanTime()
 		sanitizedIp := l.Sanitize(ip)
+		formattedIp := l.Sanitize(l.formatIP(ip))
 		resolvedSuffix := ""
 		if len(resolvedIps) > 0 {
 			resolvedSuffix = " [" + strings.Join(resolvedIps, ", ") + "]"
@@ -181,7 +203,7 @@ func (l *AuditLogger) DNS(ip string, questions []struct {
 			}
 
 			fmt.Fprintf(output, "[%s] [%s] %s requested %s%s record for %s -> %s%s\n",
-				clock, cLogType, sanitizedIp, prefix, strings.ToUpper(q.Type), l.Sanitize(q.Name), cStatus, resolvedSuffix)
+				clock, cLogType, formattedIp, prefix, strings.ToUpper(q.Type), l.Sanitize(q.Name), cStatus, resolvedSuffix)
 
 			evStatus := "allow"
 			if rcode == 5 || rcode == 3 {
@@ -205,6 +227,7 @@ type firewallLogPayload struct {
 	Component string `json:"component"`
 	Action    string `json:"action"`
 	IP        string `json:"ip"`
+	Container string `json:"container,omitempty"`
 	Target    string `json:"target"`
 	Detail    string `json:"detail"`
 }
@@ -234,6 +257,7 @@ func (l *AuditLogger) Firewall(ip string, target string, action string, detail s
 			Component: "FIREWALL",
 			Action:    action,
 			IP:        ip,
+			Container: l.resolveContainer(ip),
 			Target:    target,
 			Detail:    detail,
 		}
@@ -250,7 +274,7 @@ func (l *AuditLogger) Firewall(ip string, target string, action string, detail s
 		}
 		cComp := "\033[33mfirewall\033[0m" // Yellow
 		fmt.Fprintf(output, "[%s] [%s] connection from %s targeting %s was %s%s\n",
-			l.getHumanTime(), cComp, l.Sanitize(ip), l.Sanitize(target), cStatus, extra)
+			l.getHumanTime(), cComp, l.Sanitize(l.formatIP(ip)), l.Sanitize(target), cStatus, extra)
 
 		evStatus := "allow"
 		if action == "DENY" {
@@ -272,6 +296,7 @@ type httpLogPayload struct {
 	Level     string `json:"level"`
 	Component string `json:"component"`
 	IP        string `json:"ip"`
+	Container string `json:"container,omitempty"`
 	Method    string `json:"method"`
 	Host      string `json:"host"`
 	Path      string `json:"path"`
@@ -304,6 +329,7 @@ func (l *AuditLogger) HTTP(ip string, method string, host string, path string, s
 			Level:     level,
 			Component: "HTTP",
 			IP:        ip,
+			Container: l.resolveContainer(ip),
 			Method:    method,
 			Host:      host,
 			Path:      path,
@@ -330,7 +356,7 @@ func (l *AuditLogger) HTTP(ip string, method string, host string, path string, s
 			cStatus = "\033[32m" + cStatus + "\033[0m" // Green
 		}
 		fmt.Fprintf(output, "[%s] [%s] %s | %s %s%s status %s | %s\n",
-			l.getHumanTime(), cComp, l.Sanitize(ip), l.Sanitize(method), l.Sanitize(host), l.Sanitize(path), cStatus, routeInfo)
+			l.getHumanTime(), cComp, l.Sanitize(l.formatIP(ip)), l.Sanitize(method), l.Sanitize(host), l.Sanitize(path), cStatus, routeInfo)
 
 		evStatus := "allow"
 		if status >= 400 {
@@ -434,6 +460,7 @@ type commandLogPayload struct {
 	Level     string `json:"level"`
 	Component string `json:"component"`
 	IP        string `json:"ip"`
+	Container string `json:"container,omitempty"`
 	Command   string `json:"command"`
 }
 
@@ -452,13 +479,14 @@ func (l *AuditLogger) Command(ip string, command string) {
 			Level:     "INFO",
 			Component: "EXEC",
 			IP:        ip,
+			Container: l.resolveContainer(ip),
 			Command:   command,
 		}
 		data, _ := json.Marshal(payload)
 		fmt.Fprintln(output, string(data))
 	} else {
 		cComp := "\033[34mexecve\033[0m" // Blue
-		fmt.Fprintf(output, "[%s] [%s] %s executed: %s\n", l.getHumanTime(), cComp, l.Sanitize(ip), l.Sanitize(command))
+		fmt.Fprintf(output, "[%s] [%s] %s executed: %s\n", l.getHumanTime(), cComp, l.Sanitize(l.formatIP(ip)), l.Sanitize(command))
 		
 		GlobalBuffer.Add(LogEvent{
 			Timestamp: time.Now(),
@@ -486,13 +514,14 @@ func (l *AuditLogger) ContainerOutput(ip string, log string) {
 			Level:     "INFO",
 			Component: "STDOUT",
 			IP:        ip,
+			Container: l.resolveContainer(ip),
 			Command:   log,
 		}
 		data, _ := json.Marshal(payload)
 		fmt.Fprintln(output, string(data))
 	} else {
 		cComp := "\033[36mstdout\033[0m" // Cyan
-		fmt.Fprintf(output, "[%s] [%s] %s | %s\n", l.getHumanTime(), cComp, l.Sanitize(ip), l.Sanitize(log))
+		fmt.Fprintf(output, "[%s] [%s] %s | %s\n", l.getHumanTime(), cComp, l.Sanitize(l.formatIP(ip)), l.Sanitize(log))
 		
 		GlobalBuffer.Add(LogEvent{
 			Timestamp: time.Now(),
