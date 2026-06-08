@@ -180,7 +180,7 @@ func (h *HttpHandler) Stop() error {
 		_ = h.server.Close()
 	}
 	_ = h.VirtualListener.Close()
-	
+
 	for conn := range h.activeConns {
 		_ = conn.Close()
 	}

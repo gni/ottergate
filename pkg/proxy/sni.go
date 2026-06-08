@@ -137,14 +137,12 @@ func extractSNI(data []byte) (string, error) {
 		return "", errors.New("TLS ClientHello out of bounds")
 	}
 
-	// Session ID
 	sessionIdLength := int(data[offset])
 	offset += 1 + sessionIdLength
 	if offset >= len(data) {
 		return "", errors.New("TLS ClientHello out of bounds")
 	}
 
-	// Cipher Suites
 	if offset+2 > len(data) {
 		return "", errors.New("TLS ClientHello out of bounds")
 	}
@@ -154,14 +152,12 @@ func extractSNI(data []byte) (string, error) {
 		return "", errors.New("TLS ClientHello out of bounds")
 	}
 
-	// Compression Methods
 	compressionMethodsLength := int(data[offset])
 	offset += 1 + compressionMethodsLength
 	if offset+2 > len(data) {
 		return "", errors.New("TLS ClientHello out of bounds")
 	}
 
-	// Extensions
 	extensionsLength := int(binary.BigEndian.Uint16(data[offset:]))
 	offset += 2
 	extensionsEnd := offset + extensionsLength
@@ -180,7 +176,7 @@ func extractSNI(data []byte) (string, error) {
 		extLength := int(binary.BigEndian.Uint16(data[offset+2:]))
 		offset += 4
 
-		if extType == 0x0000 { // SNI
+		if extType == 0x0000 {
 			extEnd := offset + extLength
 			if extEnd > extensionsEnd || extEnd > len(data) {
 				return "", errors.New("SNI extension out of bounds")
@@ -190,14 +186,14 @@ func extractSNI(data []byte) (string, error) {
 			if sniOffset+2 > extEnd {
 				return "", errors.New("SNI extension out of bounds")
 			}
-			sniOffset += 2 // skip list length
+			sniOffset += 2
 
 			if sniOffset+1 > extEnd {
 				return "", errors.New("SNI extension out of bounds")
 			}
 			nameType := data[sniOffset]
 
-			if nameType == 0 { // Hostname type
+			if nameType == 0 {
 				sniOffset += 1
 				if sniOffset+2 > extEnd {
 					return "", errors.New("SNI extension out of bounds")
@@ -349,9 +345,14 @@ func (s *SniProxyService) handleConnection(clientSocket net.Conn) {
 			}
 			tlsConn := tls.Server(prefixConn, tlsCfg)
 
-			s.httpHandler.VirtualListener.conns <- tlsConn
-			isHandledOff = true
-			audit.Logger.HTTP(clientIp, "TLS-TERM", sni, fmt.Sprintf(":%d", s.port), 200, "L7 Decrypted -> Virtual HTTP Router")
+			select {
+			case s.httpHandler.VirtualListener.conns <- tlsConn:
+				isHandledOff = true
+				audit.Logger.HTTP(clientIp, "TLS-TERM", sni, fmt.Sprintf(":%d", s.port), 200, "L7 Decrypted -> Virtual HTTP Router")
+			case <-time.After(3 * time.Second):
+				_ = tlsConn.Close()
+				return errors.New("Virtual listener capacity saturated. Connection dropped via resource constraint boundary.")
+			}
 			return nil
 		}
 

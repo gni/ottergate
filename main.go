@@ -18,6 +18,7 @@ import (
 	"ottergate/pkg/audit"
 	"ottergate/pkg/config"
 	"ottergate/pkg/controlplane"
+	"ottergate/pkg/crypto"
 	"ottergate/pkg/dns"
 	"ottergate/pkg/proxy"
 )
@@ -176,12 +177,12 @@ Commands:
 
 Config Commands:
   ottergate config view                  Print the current configuration
-  ottergate config set <key> <value>       Set a configuration value using dot notation
+  ottergate config set <key> <value>       Set a configuration value using dot
                                        Example: ottergate config set port 53
                                        Example: ottergate config set controlPlane.port 8081
 
 Global Options:
-  --config, -c  Override path to configuration file (default: ~/.ottergate/config.json)
+  --config, -c  Override path to configuration file (default: 
   --json        Output CLI command results in pure JSON format
 `, CLI_VERSION)
 	os.Exit(0)
@@ -369,9 +370,8 @@ func startEngine(configPath string, portOverride string, cpPortOverride string) 
 			isEphemeralKey = true
 		}
 
-		saltBytes := make([]byte, 8)
-		_, _ = io.ReadFull(rand.Reader, saltBytes)
-		blindIndexSalt := hex.EncodeToString(saltBytes)
+		blindIndexSaltBytes := crypto.HKDF(nil, []byte(apiKey), []byte("blind_index_salt_derivation"), 16)
+		blindIndexSalt := hex.EncodeToString(blindIndexSaltBytes)
 
 		cpPort := 8080
 		socketPath := ""
