@@ -54,20 +54,9 @@ func IsPrivateOrLoopbackIP(ipStr string) bool {
 		return true
 	}
 	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-		if ip4 := ip.To4(); ip4 != nil {
-			if ip4[0] == 127 && ip4[1] == 0 && ip4[2] == 0 && ip4[3] == 1 {
-				return false
-			}
-		}
 		return true
 	}
 	if ip4 := ip.To4(); ip4 != nil {
-		if ip4[0] == 172 && ip4[1] == 20 {
-			return false
-		}
-		if ip4[0] == 172 && ip4[1] == 21 {
-			return false
-		}
 		return ip4[0] == 10 ||
 			(ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31) ||
 			(ip4[0] == 192 && ip4[1] == 168) ||
@@ -176,15 +165,9 @@ func ValidateHttpProxy(hp *HttpProxyConfig) error {
 		if len(hp.Upstream) > 8192 {
 			return ConfigValidationError{Msg: "HTTP proxy upstream URL too long"}
 		}
-		parsedUpstream, err := url.Parse(hp.Upstream)
+		_, err := url.Parse(hp.Upstream)
 		if err != nil {
 			return ConfigValidationError{Msg: fmt.Sprintf("failed to parse upstream URL: %s", err.Error())}
-		}
-		upstreamHost := parsedUpstream.Hostname()
-		if net.ParseIP(upstreamHost) != nil {
-			if IsPrivateOrLoopbackIP(upstreamHost) {
-				return ConfigValidationError{Msg: "HTTP proxy upstream destination routes to prohibited local internal space"}
-			}
 		}
 	}
 	if len(hp.Headers) > 64 {
@@ -224,9 +207,6 @@ func ValidateTlsProxy(tp *TlsProxyConfig) error {
 	if tp.TargetIp != "" {
 		if !IsValidIPv4(tp.TargetIp) && !IsValidIPv6(tp.TargetIp) {
 			return ConfigValidationError{Msg: fmt.Sprintf("invalid TLS proxy target IP: %s", tp.TargetIp)}
-		}
-		if IsPrivateOrLoopbackIP(tp.TargetIp) {
-			return ConfigValidationError{Msg: "TLS proxy target IP specifies restricted infrastructure address range"}
 		}
 	}
 	return nil
@@ -283,9 +263,6 @@ func ValidateServerConfig(c *ServerConfig) error {
 	if c.FallbackDns != "" {
 		if !IsValidIPv4(c.FallbackDns) {
 			return ConfigValidationError{Msg: fmt.Sprintf("invalid fallback DNS: %s (must be IPv4)", c.FallbackDns)}
-		}
-		if IsPrivateOrLoopbackIP(c.FallbackDns) {
-			return ConfigValidationError{Msg: fmt.Sprintf("security fallback violation: loopback or private network configuration disallowed for DNS upstream: %s", c.FallbackDns)}
 		}
 	}
 	if c.Tls != nil {
