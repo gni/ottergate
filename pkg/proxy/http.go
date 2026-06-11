@@ -405,11 +405,43 @@ func (h *HttpHandler) handleConnect(w http.ResponseWriter, r *http.Request, cfg 
 
 		_ = clientSocket.SetDeadline(time.Now().Add(h.idleTimeout))
 
-		dialAddr := fmt.Sprintf("%s:%s", targetIp, portStr)
-		dialer := net.Dialer{Timeout: 5 * time.Second}
-		uSocket, err := dialer.Dial("tcp", dialAddr)
-		if err != nil {
-			return err
+		targetUrlForProxy := &url.URL{
+			Scheme: "https",
+			Host:   net.JoinHostPort(host, portStr),
+		}
+		proxyURL, err := h.getUpstreamProxy(targetUrlForProxy)
+
+		var uSocket net.Conn
+		if err == nil && proxyURL != nil {
+			dialer := net.Dialer{Timeout: 5 * time.Second}
+			uSocket, err = dialer.Dial("tcp", proxyURL.Host)
+			if err != nil {
+				return err
+			}
+			connectReq := fmt.Sprintf("CONNECT %s:%s HTTP/1.1\r\nHost: %s:%s\r\n\r\n", host, portStr, host, portStr)
+			_, err = uSocket.Write([]byte(connectReq))
+			if err != nil {
+				uSocket.Close()
+				return err
+			}
+			respBuf := make([]byte, 4096)
+			n, err := uSocket.Read(respBuf)
+			if err != nil {
+				uSocket.Close()
+				return err
+			}
+			respStr := string(respBuf[:n])
+			if !strings.Contains(respStr, "200") {
+				uSocket.Close()
+				return fmt.Errorf("upstream proxy returned: %s", strings.Split(respStr, "\r\n")[0])
+			}
+		} else {
+			dialAddr := fmt.Sprintf("%s:%s", targetIp, portStr)
+			dialer := net.Dialer{Timeout: 5 * time.Second}
+			uSocket, err = dialer.Dial("tcp", dialAddr)
+			if err != nil {
+				return err
+			}
 		}
 		srvSocket = uSocket
 
@@ -662,9 +694,16 @@ func (h *HttpHandler) doHttpProxy(
 
 		dialAddr := fmt.Sprintf("%s:%s", targetIp, destPort)
 
+		proxyURL, err := h.getUpstreamProxy(targetUrl)
 		transport := &http.Transport{
+			Proxy: func(req *http.Request) (*url.URL, error) {
+				return proxyURL, nil
+			},
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				dialer := net.Dialer{Timeout: 5 * time.Second}
+				if proxyURL != nil {
+					return dialer.Dial(network, addr)
+				}
 				return dialer.Dial(network, dialAddr)
 			},
 			IdleConnTimeout: h.idleTimeout,
@@ -836,4 +875,60 @@ func loadTlsConfig(tc *config.TlsConfig) (*tls.Config, error) {
 	}
 
 	return tlsCfg, nil
+}
+
+func (h *HttpHandler) getUpstreamProxy(targetUrl *url.URL) (*url.URL, error) {
+	h.mu.RLock()
+	httpProxyStr := h.cfg.UpstreamHttpProxy
+	httpsProxyStr := h.cfg.UpstreamHttpsProxy
+	noProxyStr := h.cfg.UpstreamNoProxy
+	h.mu.RUnlock()
+
+	var proxyStr string
+	if strings.ToLower(targetUrl.Scheme) == "https" {
+		proxyStr = httpsProxyStr
+	} else {
+		proxyStr = httpProxyStr
+	}
+
+	// If not configured in the config file, fallback to environment variables
+	if proxyStr == "" {
+		return http.ProxyFromEnvironment(&http.Request{URL: targetUrl})
+	}
+
+	// Respect no-proxy ignores if configured
+	if noProxyStr != "" {
+		hostname := strings.ToLower(targetUrl.Hostname())
+		ignored := false
+		for _, pattern := range strings.Split(noProxyStr, ",") {
+			pattern = strings.TrimSpace(strings.ToLower(pattern))
+			if pattern == "" {
+				continue
+			}
+			if pattern == "*" {
+				ignored = true
+				break
+			}
+			if strings.HasPrefix(pattern, ".") {
+				if strings.HasSuffix(hostname, pattern) || hostname == pattern[1:] {
+					ignored = true
+					break
+				}
+			} else {
+				if hostname == pattern || strings.HasSuffix(hostname, "."+pattern) {
+					ignored = true
+					break
+				}
+			}
+		}
+		if ignored {
+			return nil, nil
+		}
+	}
+
+	proxyURL, err := url.Parse(proxyStr)
+	if err != nil {
+		return nil, err
+	}
+	return proxyURL, nil
 }

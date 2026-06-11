@@ -79,6 +79,9 @@ type ServerConfig struct {
 	TcpIdleTimeoutMs     int                   `json:"tcpIdleTimeoutMs,omitempty"`
 	RateLimitMaxRequests int                   `json:"rateLimitMaxRequests,omitempty"`
 	RateLimitWindowMs    int                   `json:"rateLimitWindowMs,omitempty"`
+	UpstreamHttpProxy    string                `json:"upstreamHttpProxy,omitempty"`
+	UpstreamHttpsProxy   string                `json:"upstreamHttpsProxy,omitempty"`
+	UpstreamNoProxy      string                `json:"upstreamNoProxy,omitempty"`
 	Hosts                map[string]HostConfig `json:"hosts"`
 }
 

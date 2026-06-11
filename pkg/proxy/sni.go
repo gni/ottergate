@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -396,11 +398,43 @@ func (s *SniProxyService) handleConnection(clientSocket net.Conn) {
 
 		audit.Logger.HTTP(clientIp, "TLS-SNI", sni, fmt.Sprintf(":%d", s.port), 200, fmt.Sprintf("Tunneled to %s:%d", targetIp, targetPort))
 
-		destAddr := fmt.Sprintf("%s:%d", targetIp, targetPort)
-		dialer := net.Dialer{Timeout: 5 * time.Second}
-		uSocket, err := dialer.Dial("tcp", destAddr)
-		if err != nil {
-			return err
+		targetUrlForProxy := &url.URL{
+			Scheme: "https",
+			Host:   fmt.Sprintf("%s:%d", sni, targetPort),
+		}
+		proxyURL, err := s.httpHandler.getUpstreamProxy(targetUrlForProxy)
+
+		var uSocket net.Conn
+		if err == nil && proxyURL != nil {
+			dialer := net.Dialer{Timeout: 5 * time.Second}
+			uSocket, err = dialer.Dial("tcp", proxyURL.Host)
+			if err != nil {
+				return err
+			}
+			connectReq := fmt.Sprintf("CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", sni, targetPort, sni, targetPort)
+			_, err = uSocket.Write([]byte(connectReq))
+			if err != nil {
+				uSocket.Close()
+				return err
+			}
+			respBuf := make([]byte, 4096)
+			n, err := uSocket.Read(respBuf)
+			if err != nil {
+				uSocket.Close()
+				return err
+			}
+			respStr := string(respBuf[:n])
+			if !strings.Contains(respStr, "200") {
+				uSocket.Close()
+				return fmt.Errorf("upstream proxy returned: %s", strings.Split(respStr, "\r\n")[0])
+			}
+		} else {
+			destAddr := fmt.Sprintf("%s:%d", targetIp, targetPort)
+			dialer := net.Dialer{Timeout: 5 * time.Second}
+			uSocket, err = dialer.Dial("tcp", destAddr)
+			if err != nil {
+				return err
+			}
 		}
 		upstreamSocket = uSocket
 

@@ -199,9 +199,12 @@ func handleInit(configPath string, isJson bool) {
 	}
 
 	defaultConf := map[string]interface{}{
-		"port":              53,
-		"httpPort":          80,
-		"httpsPort":         443,
+		"port":               53,
+		"httpPort":           80,
+		"httpsPort":          443,
+		"upstreamHttpProxy":  "",
+		"upstreamHttpsProxy": "",
+		"upstreamNoProxy":    "",
 		"fallbackDns":       "1.1.1.1",
 		"maxTcpConnections": 100,
 		"tcpIdleTimeoutMs":  30000,
