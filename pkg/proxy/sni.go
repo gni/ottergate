@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"net/url"
 	"strings"
 	"sync"
