@@ -639,9 +639,12 @@ func (h *HttpHandler) handleRequest(w http.ResponseWriter, r *http.Request, cfg 
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
-
-	targetUrl, _ := url.Parse("http://" + rawHost + reqUrl)
-
+	var targetUrl *url.URL
+	if strings.HasPrefix(reqUrl, "http://") || strings.HasPrefix(reqUrl, "https://") {
+		targetUrl, _ = url.Parse(reqUrl)
+	} else {
+		targetUrl, _ = url.Parse("http://" + rawHost + reqUrl)
+	}
 	h.doHttpProxy(
 		w, r,
 		targetUrl, targetIp,
