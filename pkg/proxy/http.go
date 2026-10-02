@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -536,17 +537,16 @@ func (h *HttpHandler) handleRequest(w http.ResponseWriter, r *http.Request, cfg 
 
 			targetIp := validatedIps[0]
 
-			safePath := "/"
+			targetUrl, _ := url.Parse(upstreamBase.String())
 			parsedPath, err := url.Parse(reqUrl)
 			if err == nil {
-				safePath = parsedPath.Path
-				if parsedPath.RawQuery != "" {
-					safePath += "?" + parsedPath.RawQuery
+				if upstreamBase.Path != "" && upstreamBase.Path != "/" {
+					targetUrl.Path = strings.TrimSuffix(upstreamBase.Path, "/") + parsedPath.Path
+				} else {
+					targetUrl.Path = parsedPath.Path
 				}
+				targetUrl.RawQuery = parsedPath.RawQuery
 			}
-
-			targetUrl, _ := url.Parse(upstreamBase.String())
-			targetUrl.Path = safePath
 
 			customReqHeaders := make(map[string]string)
 			customResHeaders := make(map[string]string)
@@ -680,10 +680,26 @@ func (h *HttpHandler) doHttpProxy(
 	}
 	loopToken := h.generateLoopToken(reqUrl, clientIp)
 
+	var bodyBytes []byte
+	if forwardBody && r.Method != "GET" && r.Method != "HEAD" && r.Body != nil {
+		if r.ContentLength > maxBodyBytes {
+			audit.Logger.HTTP(clientIp, r.Method, hostname, reqUrl, 413, "Payload exceeds maxRequestBodyBytes")
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			_, _ = w.Write([]byte("<h1>413 Payload Too Large</h1>"))
+			return
+		}
+		var err error
+		bodyBytes, err = io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+		if err != nil {
+			h.handleHttpFault(err, clientIp, r.Method, hostname, reqUrl, w)
+			return
+		}
+	}
+
 	executeProxy := func() error {
 		var bodyReader io.Reader
-		if forwardBody && r.Method != "GET" && r.Method != "HEAD" {
-			bodyReader = io.LimitReader(r.Body, maxBodyBytes)
+		if bodyBytes != nil {
+			bodyReader = bytes.NewReader(bodyBytes)
 		}
 
 		destPort := targetUrl.Port()
@@ -735,6 +751,15 @@ func (h *HttpHandler) doHttpProxy(
 			return err
 		}
 
+		if bodyBytes != nil {
+			upReq.ContentLength = int64(len(bodyBytes))
+			upReq.GetBody = func() (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader(bodyBytes)), nil
+			}
+		} else if r.Method != "GET" && r.Method != "HEAD" {
+			upReq.ContentLength = 0
+		}
+
 		for k, vv := range r.Header {
 			lowerK := strings.ToLower(k)
 			isHop := false
@@ -744,18 +769,19 @@ func (h *HttpHandler) doHttpProxy(
 					break
 				}
 			}
-			if !isHop {
+			if !isHop && lowerK != "content-length" {
 				upReq.Header[k] = vv
 			}
 		}
 
+		upReq.Host = targetUrl.Host
 		upReq.Header.Set("Host", targetUrl.Host)
 		upReq.Header.Set("X-Ottergate-Loop", loopToken)
 
 		if forwardBody && r.Method != "GET" && r.Method != "HEAD" {
 			upReq.Header.Set("X-Body-Forwarded", "true")
-			if r.ContentLength > 0 {
-				upReq.Header.Set("X-Body-Size", fmt.Sprintf("%d", r.ContentLength))
+			if bodyBytes != nil {
+				upReq.Header.Set("X-Body-Size", fmt.Sprintf("%d", len(bodyBytes)))
 			}
 		}
 

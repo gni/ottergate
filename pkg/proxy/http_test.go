@@ -1,6 +1,11 @@
 package proxy
 
 import (
+	"bytes"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -75,4 +80,98 @@ func TestSanitizeHeader(t *testing.T) {
 	if errLong == nil {
 		t.Error("expected error for overlong header value")
 	}
+}
+
+func TestHttpProxyPostWithBodyAndQueryParams(t *testing.T) {
+	var receivedBody []byte
+	var receivedContentLength int64
+	var receivedTransferEncoding []string
+	var receivedURL string
+	var receivedHost string
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedBody, _ = io.ReadAll(r.Body)
+		receivedContentLength = r.ContentLength
+		receivedTransferEncoding = r.TransferEncoding
+		receivedURL = r.URL.String()
+		receivedHost = r.Host
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer backend.Close()
+
+	cfg := &config.ServerConfig{
+		Firewall: &config.FirewallConfig{
+			DefaultPolicy: "allow",
+			AllowlistIps:  []string{"127.0.0.1"},
+		},
+		Hosts: map[string]config.HostConfig{
+			"agent.operations": {
+				Records: []config.DnsRecord{
+					{Type: "A", Address: "127.0.0.1"},
+				},
+				HttpProxy: &config.HttpProxyConfig{
+					Enabled:             true,
+					Upstream:            backend.URL,
+					ForwardRequestBody:  true,
+					MaxRequestBodyBytes: 1048576,
+				},
+			},
+		},
+	}
+
+	handler := NewHttpHandler(cfg)
+
+	// 1. Test POST with body and query params
+	bodyPayload := `{"model":"test","messages":[{"role":"user","content":"hello"}]}`
+	req, _ := http.NewRequest("POST", "http://agent.operations/v1/chat/completions?stream=true", bytes.NewBufferString(bodyPayload))
+	req.RequestURI = "/v1/chat/completions?stream=true"
+	req.Host = "agent.operations"
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyPayload)))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	res := rec.Result()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", res.StatusCode)
+	}
+
+	if string(receivedBody) != bodyPayload {
+		t.Errorf("expected body %q, got %q", bodyPayload, string(receivedBody))
+	}
+
+	if receivedContentLength != int64(len(bodyPayload)) {
+		t.Errorf("expected Content-Length %d, got %d", len(bodyPayload), receivedContentLength)
+	}
+
+	if len(receivedTransferEncoding) > 0 {
+		t.Errorf("expected no chunked transfer encoding, got %v", receivedTransferEncoding)
+	}
+
+	if receivedURL != "/v1/chat/completions?stream=true" {
+		t.Errorf("expected URL '/v1/chat/completions?stream=true', got %q", receivedURL)
+	}
+
+	// 2. Test payload exceeding maxRequestBodyBytes returns 413
+	cfg.Hosts["agent.operations"].HttpProxy.MaxRequestBodyBytes = 10
+	largeBody := "this is a very long body exceeding 10 bytes"
+	reqLarge, _ := http.NewRequest("POST", "http://agent.operations/v1/test", bytes.NewBufferString(largeBody))
+	reqLarge.RequestURI = "/v1/test"
+	reqLarge.Host = "agent.operations"
+	reqLarge.RemoteAddr = "127.0.0.1:54321"
+	reqLarge.Header.Set("Content-Length", fmt.Sprintf("%d", len(largeBody)))
+
+	recLarge := httptest.NewRecorder()
+	handler.ServeHTTP(recLarge, reqLarge)
+
+	if recLarge.Result().StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413 Payload Too Large, got %d", recLarge.Result().StatusCode)
+	}
+
+	_ = receivedHost
 }
