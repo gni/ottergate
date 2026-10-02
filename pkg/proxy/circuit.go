@@ -65,9 +65,11 @@ func (cb *ProxyCircuitBreaker) Execute(action func() error) error {
 	if err != nil {
 		cb.failures++
 		cb.lastFailureTime = time.Now()
-		cb.state = StateOpen
 		cb.trialInFlight = false
-		audit.Logger.System(cb.targetHost + " Circuit Breaker transitioned to OPEN due to trial failure")
+		if cb.state == StateHalfOpen || cb.failures >= cb.threshold {
+			cb.state = StateOpen
+			audit.Logger.System(cb.targetHost + " Circuit Breaker transitioned to OPEN")
+		}
 		return err
 	}
 

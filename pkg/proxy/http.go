@@ -567,10 +567,7 @@ func (h *HttpHandler) handleRequest(w http.ResponseWriter, r *http.Request, cfg 
 			customResHeaders["X-Frame-Options"] = "DENY"
 			customResHeaders["X-XSS-Protection"] = "1; mode=block"
 
-			maxBodyBytes := int64(5242880)
-			if hostConfig.HttpProxy.MaxRequestBodyBytes > 0 {
-				maxBodyBytes = hostConfig.HttpProxy.MaxRequestBodyBytes
-			}
+			maxBodyBytes := hostConfig.HttpProxy.MaxRequestBodyBytes
 
 			var clientTlsConfig *tls.Config
 			if hostConfig.HttpProxy.ClientTls != nil {
@@ -653,7 +650,7 @@ func (h *HttpHandler) handleRequest(w http.ResponseWriter, r *http.Request, cfg 
 		h.getCircuitBreaker(hostname),
 		targetIp,
 		nil, nil,
-		5242880,
+		0,
 		nil,
 		true,
 		cfg,
@@ -682,14 +679,18 @@ func (h *HttpHandler) doHttpProxy(
 
 	var bodyBytes []byte
 	if forwardBody && r.Method != "GET" && r.Method != "HEAD" && r.Body != nil {
-		if r.ContentLength > maxBodyBytes {
+		if maxBodyBytes > 0 && r.ContentLength > maxBodyBytes {
 			audit.Logger.HTTP(clientIp, r.Method, hostname, reqUrl, 413, "Payload exceeds maxRequestBodyBytes")
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
 			_, _ = w.Write([]byte("<h1>413 Payload Too Large</h1>"))
 			return
 		}
 		var err error
-		bodyBytes, err = io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+		if maxBodyBytes > 0 {
+			bodyBytes, err = io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+		} else {
+			bodyBytes, err = io.ReadAll(r.Body)
+		}
 		if err != nil {
 			h.handleHttpFault(err, clientIp, r.Method, hostname, reqUrl, w)
 			return
@@ -740,7 +741,7 @@ func (h *HttpHandler) doHttpProxy(
 
 		client := &http.Client{
 			Transport: transport,
-			Timeout:   15 * time.Second,
+			Timeout:   0,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -823,7 +824,25 @@ func (h *HttpHandler) doHttpProxy(
 		w.WriteHeader(resp.StatusCode)
 		audit.Logger.HTTP(clientIp, r.Method, hostname, targetUrl.Path, resp.StatusCode, auditUrl)
 
-		_, _ = io.Copy(w, resp.Body)
+		flusher, isFlusher := w.(http.Flusher)
+		buf := make([]byte, 4096)
+		for {
+			n, readErr := resp.Body.Read(buf)
+			if n > 0 {
+				if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+					return writeErr
+				}
+				if isFlusher {
+					flusher.Flush()
+				}
+			}
+			if readErr != nil {
+				if readErr != io.EOF {
+					return readErr
+				}
+				break
+			}
+		}
 		return nil
 	}
 

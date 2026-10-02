@@ -184,8 +184,8 @@ func ValidateHttpProxy(hp *HttpProxyConfig) error {
 			return ConfigValidationError{Msg: fmt.Sprintf("proxy header %s is too long", k)}
 		}
 	}
-	if hp.MaxRequestBodyBytes < 0 || hp.MaxRequestBodyBytes > 10485760 {
-		return ConfigValidationError{Msg: "invalid maxRequestBodyBytes value (must be 0-10485760)"}
+	if hp.MaxRequestBodyBytes < -1 {
+		return ConfigValidationError{Msg: "invalid maxRequestBodyBytes value (must be >= -1, where 0 or -1 disables the limit)"}
 	}
 	if hp.ClientTls != nil {
 		if err := ValidateTls(hp.ClientTls); err != nil {
